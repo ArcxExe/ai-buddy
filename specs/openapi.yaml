@@ -1,0 +1,526 @@
+openapi: 3.1.0
+info:
+  title: AI-buddy API (Avito Start Hack&Change 2026)
+  version: 1.0.0
+  description: >
+    REST API контракт между Go 1.27.3 Backend и React 19 + TypeScript Frontend.
+    Обеспечивает время отклика <1 с для локальных операций, ролевую модель RBAC
+    и выполнение действий через корпоративные сервисы (MCP).
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Локальный и Docker-сервер разработки
+
+paths:
+  /health:
+    get:
+      summary: Проверка состояния сервера, LLM-провайдера и времени отклика
+      operationId: getHealth
+      responses:
+        "200":
+          description: Сервис работает
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /context:
+    get:
+      summary: Получить полный контекст текущего пользователя, активную роль, прогресс адаптации, заявки и метрики
+      operationId: getAppContext
+      parameters:
+        - name: X-User-Role
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/RoleEnum"
+      responses:
+        "200":
+          description: Полный снимок состояния для мгновенного отображения интерфейса (<1 с)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppContextResponse"
+
+  /auth/switch-role:
+    post:
+      summary: Переключить активную роль для демонстрации (Стажёр / Наставник / Руководитель)
+      operationId: switchRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  $ref: "#/components/schemas/RoleEnum"
+      responses:
+        "200":
+          description: Профиль активной роли обновлён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+
+  /onboarding/checklist/{itemId}:
+    patch:
+      summary: Изменить статус задачи в чек-листе адаптации стажёра
+      operationId: updateChecklistItem
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [todo, in_progress, done]
+      responses:
+        "200":
+          description: Обновлённое состояние чек-листа и этапов адаптации
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingState"
+
+  /chat/messages:
+    get:
+      summary: Получить историю диалога с AI-buddy
+      operationId: getChatMessages
+      responses:
+        "200":
+          description: Список сообщений чата
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+    post:
+      summary: Отправить сообщение AI-buddy (с контекстным поиском, проверкой RBAC и вызовом MCP-инструментов)
+      operationId: sendChatMessage
+      parameters:
+        - name: X-User-Role
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/RoleEnum"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: Текст вопроса или команды пользователя
+                scenario_hint:
+                  type: string
+                  description: Опциональный идентификатор быстрого пресета сценария
+      responses:
+        "200":
+          description: Ответ AI-buddy, список задействованных источников, вызванных MCP-тулов и созданных карточек действий
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+
+  /chat/reset:
+    post:
+      summary: Сбросить историю чата и вернуть демо-данные в исходное состояние
+      operationId: resetDemoState
+      responses:
+        "200":
+          description: Состояние успешно сброшено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppContextResponse"
+
+  /corporate/actions/confirm:
+    post:
+      summary: Подтвердить черновик действия в корпоративном сервисе (например, отправку заявки на отгул в Avito Absence)
+      operationId: confirmCorporateAction
+      parameters:
+        - name: X-User-Role
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/RoleEnum"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id]
+              properties:
+                request_id:
+                  type: string
+      responses:
+        "200":
+          description: Действие выполнено и сохранено в корпоративном сервисе
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CorporateRequest"
+
+  /corporate/requests/{requestId}/review:
+    post:
+      summary: Согласовать или отклонить заявку стажёра (доступно только ролям mentor и manager — проверка RBAC)
+      operationId: reviewCorporateRequest
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-User-Role
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/RoleEnum"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [approved, rejected]
+                comment:
+                  type: string
+      responses:
+        "200":
+          description: Статус заявки обновлён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CorporateRequest"
+        "403":
+          description: Отказ доступа RBAC (стажёр не может сам согласовать свою заявку)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /knowledge:
+    get:
+      summary: Получить список доступных документов базы знаний с учётом текущей роли (RBAC фильтрация)
+      operationId: listKnowledgeArticles
+      parameters:
+        - name: X-User-Role
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/RoleEnum"
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Отфильтрованные по роли статьи базы знаний и число скрытых RBAC документов
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeListResponse"
+
+components:
+  schemas:
+    RoleEnum:
+      type: string
+      enum: [intern, mentor, manager]
+
+    HealthResponse:
+      type: object
+      required: [status, go_version, llm_provider, llm_model, live_llm_configured]
+      properties:
+        status:
+          type: string
+        go_version:
+          type: string
+        llm_provider:
+          type: string
+        llm_model:
+          type: string
+        live_llm_configured:
+          type: boolean
+
+    UserProfile:
+      type: object
+      required: [id, name, role, role_title, team, department, mentor_name, manager_name, avatar_initials, permissions]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          $ref: "#/components/schemas/RoleEnum"
+        role_title:
+          type: string
+        team:
+          type: string
+        department:
+          type: string
+        mentor_name:
+          type: string
+        manager_name:
+          type: string
+        avatar_initials:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+
+    ChecklistItem:
+      type: object
+      required: [id, stage_id, title, description, status, category, estimated_time, suggested_prompt]
+      properties:
+        id:
+          type: string
+        stage_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [todo, in_progress, done]
+        category:
+          type: string
+          enum: [access, tools, processes, first_task]
+        estimated_time:
+          type: string
+        suggested_prompt:
+          type: string
+
+    OnboardingStage:
+      type: object
+      required: [id, title, period, status, progress_percent]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        period:
+          type: string
+        status:
+          type: string
+          enum: [completed, current, upcoming]
+        progress_percent:
+          type: integer
+
+    OnboardingState:
+      type: object
+      required: [overall_progress, current_stage_id, next_recommended_step, stages, checklist]
+      properties:
+        overall_progress:
+          type: integer
+        current_stage_id:
+          type: string
+        next_recommended_step:
+          $ref: "#/components/schemas/ChecklistItem"
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnboardingStage"
+        checklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChecklistItem"
+
+    CorporateRequest:
+      type: object
+      required: [id, service_name, tool_name, request_type, title, summary, status, created_by_role, target_resource, created_at, details]
+      properties:
+        id:
+          type: string
+        service_name:
+          type: string
+        tool_name:
+          type: string
+        request_type:
+          type: string
+          enum: [access_request, absence_request, mentor_1on1_summary, rbac_blocked]
+        title:
+          type: string
+        summary:
+          type: string
+        status:
+          type: string
+          enum: [draft_confirmation_required, pending_approval, approved, completed, blocked_by_rbac, rejected]
+        created_by_role:
+          $ref: "#/components/schemas/RoleEnum"
+        target_resource:
+          type: string
+        reviewer_comment:
+          type: string
+        created_at:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    KnowledgeCitation:
+      type: object
+      required: [id, title, source, sensitivity]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        source:
+          type: string
+        sensitivity:
+          type: string
+
+    ChatMessage:
+      type: object
+      required: [id, sender, role_context, content, created_at]
+      properties:
+        id:
+          type: string
+        sender:
+          type: string
+          enum: [user, assistant]
+        role_context:
+          $ref: "#/components/schemas/RoleEnum"
+        content:
+          type: string
+        created_at:
+          type: string
+        processing_steps:
+          type: array
+          items:
+            type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeCitation"
+        action_card:
+          $ref: "#/components/schemas/CorporateRequest"
+        engine_used:
+          type: string
+
+    ChatResponse:
+      type: object
+      required: [user_message, assistant_message, onboarding, corporate_requests, metrics]
+      properties:
+        user_message:
+          $ref: "#/components/schemas/ChatMessage"
+        assistant_message:
+          $ref: "#/components/schemas/ChatMessage"
+        onboarding:
+          $ref: "#/components/schemas/OnboardingState"
+        corporate_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/CorporateRequest"
+        metrics:
+          $ref: "#/components/schemas/ImpactMetrics"
+
+    ImpactMetrics:
+      type: object
+      required: [mentor_hours_baseline, mentor_hours_saved, routine_questions_resolved, mcp_actions_executed, rbac_violations_prevented, avg_local_latency_ms]
+      properties:
+        mentor_hours_baseline:
+          type: number
+        mentor_hours_saved:
+          type: number
+        routine_questions_resolved:
+          type: integer
+        mcp_actions_executed:
+          type: integer
+        rbac_violations_prevented:
+          type: integer
+        avg_local_latency_ms:
+          type: integer
+
+    AppContextResponse:
+      type: object
+      required: [current_user, available_roles, onboarding, corporate_requests, metrics, feature_flags]
+      properties:
+        current_user:
+          $ref: "#/components/schemas/UserProfile"
+        available_roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserProfile"
+        onboarding:
+          $ref: "#/components/schemas/OnboardingState"
+        corporate_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/CorporateRequest"
+        metrics:
+          $ref: "#/components/schemas/ImpactMetrics"
+        feature_flags:
+          type: object
+          additionalProperties: boolean
+
+    KnowledgeArticle:
+      type: object
+      required: [id, title, category, sensitivity, source, summary, content, tags]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        category:
+          type: string
+        sensitivity:
+          type: string
+          enum: [public, intern, mentor_only, manager_only]
+        source:
+          type: string
+        summary:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    KnowledgeListResponse:
+      type: object
+      required: [role, visible_articles, hidden_by_rbac_count]
+      properties:
+        role:
+          $ref: "#/components/schemas/RoleEnum"
+        visible_articles:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeArticle"
+        hidden_by_rbac_count:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required: [error, code, role]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        role:
+          type: string

@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "mcp_version": "2025-03-26",
+  "server_name": "avito-corporate-mcp-server",
+  "description": "Реестр MCP-инструментов AI-buddy для взаимодействия с имитациями корпоративных сервисов Авито (Access/IDM, Absence, Onboarding Checklist, Mentor 1:1 Sync).",
+  "tools": [
+    {
+      "name": "search_knowledge_base",
+      "description": "Контекстный поиск по внутренней базе знаний команды и AvitoTech Playbook с автоматической фильтрацией по роли пользователя (RBAC).",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Knowledge Hub (Playbook & Team Docs)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Поисковый запрос (например: 'правила оформления отгула', 'настройка окружения Go PaaS', 'стандарты Code Review')"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["all", "onboarding", "engineering", "hr_processes", "security", "management"],
+            "default": "all"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "get_onboarding_status",
+      "description": "Получить текущий этап адаптации стажёра, список выполненных и предстоящих задач чек-листа и рекомендуемый следующий шаг.",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Start Onboarding Tracker",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "intern_id": {
+            "type": "string",
+            "description": "ID стажёра (по умолчанию текущий стажёр 'usr-intern-01')"
+          }
+        }
+      }
+    },
+    {
+      "name": "complete_checklist_item",
+      "description": "Отметить шаг чек-листа адаптации как выполненный и пересчитать прогресс стажёра.",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Start Onboarding Tracker",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Идентификатор задачи чек-листа (например: 'step-01-vpn', 'step-02-access', 'step-03-local-run')"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["todo", "in_progress", "done"],
+            "default": "done"
+          }
+        },
+        "required": ["item_id", "status"]
+      }
+    },
+    {
+      "name": "request_service_access",
+      "description": "Создать заявку на получение доступа к корпоративному репозиторию, окружению PaaS или сервису в системе Avito Access / IDM. Проходит обязательную проверку RBAC.",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Access / IDM Service",
+      "rbac_restricted_resources": [
+        "prod-billing-db",
+        "prod-users-pii",
+        "k8s-cluster-admin",
+        "hr-salary-grades"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string",
+            "description": "Идентификатор ресурса (например: 'repo:avito-delivery-core', 'paas:staging-delivery', 'grafana:delivery-metrics', либо запрещённый 'prod-billing-db')"
+          },
+          "access_level": {
+            "type": "string",
+            "enum": ["read", "read_write", "deploy_staging", "admin"],
+            "default": "read_write"
+          },
+          "justification": {
+            "type": "string",
+            "description": "Обоснование заявки для руководителя и ИБ"
+          }
+        },
+        "required": ["resource", "access_level", "justification"]
+      }
+    },
+    {
+      "name": "create_absence_request",
+      "description": "Подготовить или отправить заявку на отгул / учебное отсутствие в корпоративный сервис Отсутствий (Avito Absence Service) с уведомлением наставника и руководителя.",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": true,
+      "corporate_service": "Avito Absence Service (Система отсутствий)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "absence_type": {
+            "type": "string",
+            "enum": ["study_day_off", "personal_day_off", "sick_leave", "vacation"],
+            "description": "Тип отсутствия (study_day_off — учебный отгул для стажёра)"
+          },
+          "start_date": {
+            "type": "string",
+            "description": "Дата начала отсутствия в формате YYYY-MM-DD"
+          },
+          "end_date": {
+            "type": "string",
+            "description": "Дата окончания отсутствия в формате YYYY-MM-DD"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Комментарий для руководителя и наставника (например: 'Сдача зачёта/экзамена в университете')"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Если false — создаётся черновик для подтверждения пользователем в UI; если true — заявка фиксируется в системе Отсутствий.",
+            "default": false
+          }
+        },
+        "required": ["absence_type", "start_date", "end_date", "reason"]
+      }
+    },
+    {
+      "name": "prepare_mentor_1on1_summary",
+      "description": "Сформировать и сохранить структурированную повестку вопросов к встрече 1:1 с наставником (buddy), чтобы сэкономить время наставника на погружение в контекст.",
+      "required_roles": ["intern", "mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Mentor Sync & Calendar Service",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Тема встречи 1:1 (например: 'Архитектура кэширования в первой задаче и разбор PR')"
+          },
+          "what_intern_already_checked": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Список материалов и шагов, которые стажёр уже изучил самостоятельно через AI-buddy"
+          },
+          "questions_for_mentor": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Конкретные вопросы, требующие экспертизы наставника"
+          }
+        },
+        "required": ["topic", "questions_for_mentor"]
+      }
+    },
+    {
+      "name": "review_corporate_request",
+      "description": "Согласовать или отклонить заявку стажёра (отгул или доступ). Доступно ТОЛЬКО ролям Наставник (mentor) и Руководитель (manager).",
+      "required_roles": ["mentor", "manager"],
+      "requires_confirmation": false,
+      "corporate_service": "Avito Corporate Workflow Engine",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "ID заявки (например: 'ABS-2026-881' или 'ACC-2026-104')"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected"]
+          },
+          "reviewer_comment": {
+            "type": "string",
+            "description": "Комментарий наставника или руководителя"
+          }
+        },
+        "required": ["request_id", "decision"]
+      }
+    }
+  ]
+}

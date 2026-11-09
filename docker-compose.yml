@@ -1,0 +1,55 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: aibuddy-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_ENV=production
+      - BACKEND_PORT=8080
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash}
+      - POSTGRES_DSN=postgres://aibuddy:aibuddy_secret@postgres:5432/aibuddy?sslmode=disable
+      - REDIS_ADDR=redis:6379
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aibuddy-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aibuddy-postgres
+    environment:
+      - POSTGRES_USER=aibuddy
+      - POSTGRES_PASSWORD=aibuddy_secret
+      - POSTGRES_DB=aibuddy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aibuddy-redis
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

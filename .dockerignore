@@ -1,0 +1,21 @@
+# Git & IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# Backend artifacts
+backend/bin
+backend/coverage.out
+backend/coverage.html
+coverage
+
+# Frontend artifacts
+frontend/node_modules
+frontend/dist
+frontend/coverage
+node_modules
+dist
+
+# Secrets
+.env

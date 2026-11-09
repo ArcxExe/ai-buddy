@@ -3,9 +3,10 @@ FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod ./
-COPY cmd/ cmd/
-COPY internal/ internal/
+# Build context is the project root (context: .)
+COPY backend/go.mod ./
+COPY backend/cmd/ cmd/
+COPY backend/internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/server ./cmd/server
 

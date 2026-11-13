@@ -1,97 +1,142 @@
 package main
 
 import (
-	"aibuddy/backend/internal/ai"
-	httpapi "aibuddy/backend/internal/http"
-	"aibuddy/backend/internal/mcp"
-	"aibuddy/backend/internal/rag"
 	"context"
-	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"aibuddy/backend/internal/ai"
+	"aibuddy/backend/internal/config"
+	"aibuddy/backend/internal/domain"
+	httpapi "aibuddy/backend/internal/http"
+	"aibuddy/backend/internal/mcp"
+	"aibuddy/backend/internal/rag"
+	"aibuddy/backend/internal/storage"
+	"aibuddy/backend/internal/telemetry"
 )
 
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
-}
-
 func main() {
-	port := getEnv("BACKEND_PORT", "8080")
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	baseURL := getEnv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-	model := getEnv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	log.Printf("[AI-buddy] Starting backend server (Go 1.27.3)...")
-	log.Printf("[AI-buddy] LLM Provider: OpenRouter (model: %s)", model)
-	if apiKey == "" {
-		log.Printf("[AI-buddy] Notice: OPENROUTER_API_KEY is not set. Smart SDD Fallback Engine is active (100%% offline hackathon proof).")
-	} else {
-		log.Printf("[AI-buddy] OpenRouter API key detected. Live LLM calls enabled.")
-	}
+	cfg := config.Load()
 
-	// 1. Initialize State and Services
-	store := mcp.NewStore()
-	executor := mcp.NewExecutor(store)
-
-	kb := rag.NewKnowledgeBase()
-	seedPaths := []string{
-		"data/knowledge/avito_playbook_seed.json",
-		"../data/knowledge/avito_playbook_seed.json",
-		"../../data/knowledge/avito_playbook_seed.json",
-	}
-	loaded := false
-	for _, p := range seedPaths {
-		if err := kb.LoadFromJSON(p); err == nil {
-			log.Printf("[AI-buddy] Loaded knowledge base from %s", p)
-			loaded = true
-			break
-		}
-	}
-	if !loaded {
-		log.Printf("[AI-buddy] Warning: Could not find seed JSON file, starting with default empty KB.")
-	}
-
-	agentCfg := ai.Config{
-		Provider:       "openrouter",
-		APIKey:         apiKey,
-		BaseURL:        baseURL,
-		Model:          model,
-		Timeout:        15 * time.Second,
-		EnableFallback: true,
-	}
-	agent := ai.NewAgentOrchestrator(agentCfg, kb, executor)
-
-	apiServer := httpapi.NewServer(store, executor, kb, agent)
-
-	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      apiServer.Routes(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 20 * time.Second,
-	}
-
-	// Graceful shutdown
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		log.Printf("[AI-buddy] Server listening on http://0.0.0.0:%s", port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[AI-buddy] HTTP server failed: %v", err)
+	repo := storage.NewRepository(rootCtx, cfg)
+	defer func() {
+		if err := repo.Close(); err != nil {
+			log.Printf("WARN: repository close error: %v", err)
 		}
 	}()
 
+	tracker := telemetry.NewTracker(cfg.FeatureFlags.ClickstreamAnalytics)
+	tracker.SetSink(func(ev telemetry.ClickstreamEvent) {
+		if repo.Mode() == "memory" {
+			_ = repo.AppendClickstream(rootCtx, storage.ClickstreamRecord{
+				ID:        ev.ID,
+				EventType: ev.EventType,
+				ActorRole: ev.ActorRole,
+				ActorID:   ev.ActorID,
+				Route:     ev.Route,
+				LatencyMs: ev.LatencyMs,
+				Metadata:  ev.Metadata,
+				Timestamp: ev.Timestamp,
+			})
+			return
+		}
+		go func(event telemetry.ClickstreamEvent) {
+			ctx, stop := context.WithTimeout(rootCtx, time.Second)
+			defer stop()
+			_ = repo.AppendClickstream(ctx, storage.ClickstreamRecord{
+				ID:        event.ID,
+				EventType: event.EventType,
+				ActorRole: event.ActorRole,
+				ActorID:   event.ActorID,
+				Route:     event.Route,
+				LatencyMs: event.LatencyMs,
+				Metadata:  event.Metadata,
+				Timestamp: event.Timestamp,
+			})
+		}(ev)
+	})
+
+	store := mcp.NewStoreWithRepo(rootCtx, repo)
+
+	kb := rag.NewKnowledgeBase()
+	if seedPath := resolveKnowledgePath(cfg.KnowledgePath); seedPath != "" {
+		if err := kb.LoadFromJSON(seedPath); err != nil {
+			log.Printf("WARN: could not load knowledge seed %s: %v", seedPath, err)
+		} else {
+			articles, _ := kb.ListAllVisible(domain.RoleManager)
+			store.SetArticles(articles)
+			log.Printf("INFO: Loaded %d knowledge articles from %s", len(articles), seedPath)
+		}
+	} else {
+		log.Printf("WARN: knowledge seed file not found, starting with empty KB")
+	}
+
+	exec := mcp.NewExecutorWithDeps(store, kb, tracker)
+	aiCfg := ai.Config{
+		Provider:       cfg.LLMProvider,
+		APIKey:         cfg.OpenRouterAPIKey,
+		BaseURL:        cfg.OpenRouterBaseURL,
+		Model:          cfg.OpenRouterModel,
+		Timeout:        cfg.LLMTimeout,
+		EnableFallback: true,
+	}
+	agent := ai.NewAgentOrchestratorWithDeps(aiCfg, kb, exec, exec, nil, tracker, cfg.FeatureFlags.RBACStrict)
+
+	srv := httpapi.NewServerWithConfig(cfg, store, exec, kb, agent, tracker)
+	srv.StartProactiveHintWorker(rootCtx, 10*time.Minute)
+
+	httpServer := &http.Server{
+		Addr:              cfg.ListenAddr(),
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		log.Printf("AI-buddy Backend listening on %s (storage=%s, openrouter_enabled=%t, model=%s)",
+			cfg.ListenAddr(), repo.Mode(), cfg.OpenRouterEnabled(), cfg.OpenRouterModel)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Printf("[AI-buddy] Shutting down gracefully...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	log.Printf("[AI-buddy] Server stopped.")
+
+	log.Println("Shutting down AI-buddy Backend cleanly...")
+	cancel()
+	ctx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+}
+
+func resolveKnowledgePath(override string) string {
+	candidates := []string{
+		override,
+		filepath.Join("data", "knowledge", "avito_playbook_seed.json"),
+		filepath.Join("..", "data", "knowledge", "avito_playbook_seed.json"),
+		filepath.Join("..", "..", "data", "knowledge", "avito_playbook_seed.json"),
+		filepath.Join("/app", "data", "knowledge", "avito_playbook_seed.json"),
+	}
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
 }

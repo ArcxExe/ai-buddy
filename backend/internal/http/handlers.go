@@ -1,169 +1,294 @@
 package httpapi
 
 import (
-	"aibuddy/backend/internal/ai"
-	"aibuddy/backend/internal/domain"
-	"aibuddy/backend/internal/mcp"
-	"aibuddy/backend/internal/rag"
-	"aibuddy/backend/internal/rbac"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"aibuddy/backend/internal/ai"
+	"aibuddy/backend/internal/config"
+	"aibuddy/backend/internal/domain"
+	"aibuddy/backend/internal/mcp"
+	"aibuddy/backend/internal/rag"
+	"aibuddy/backend/internal/telemetry"
 )
 
+// Server serves REST API endpoints matching specs/openapi.yaml.
 type Server struct {
-	mu           sync.RWMutex
-	Store        *mcp.Store
-	Executor     *mcp.Executor
-	KB           *rag.KnowledgeBase
-	Agent        *ai.AgentOrchestrator
-	Messages     []domain.ChatMessage
-	Users        map[domain.Role]domain.UserProfile
-	ActiveRole   domain.Role
-	FeatureFlags map[string]bool
-	GoVersion    string
+	mu             sync.RWMutex
+	Store          *mcp.Store
+	Executor       *mcp.Executor
+	KB             *rag.KnowledgeBase
+	Agent          *ai.AgentOrchestrator
+	Tracker        telemetry.ClickstreamTracker
+	Messages       []domain.ChatMessage
+	Users          map[domain.Role]domain.UserProfile
+	ActiveRole     domain.Role
+	FeatureFlags   map[string]bool
+	AllowedOrigins []string
+	GoVersion      string
 }
 
+// NewServer constructs an HTTP API server using default runtime configuration.
 func NewServer(store *mcp.Store, exec *mcp.Executor, kb *rag.KnowledgeBase, agent *ai.AgentOrchestrator) *Server {
-	users := map[domain.Role]domain.UserProfile{
-		domain.RoleIntern: {
-			ID:             "usr-intern-01",
-			Name:           "Алексей Смирнов",
-			Role:           domain.RoleIntern,
-			RoleTitle:      "Backend Go Intern",
-			Team:           "Авито Доставка",
-			Department:     "Транспорт и Логистика",
-			MentorName:     "Мария Козлова",
-			ManagerName:    "Дмитрий Волков",
-			AvatarInitials: "АС",
-			Permissions:    []string{"read_own_checklist", "request_access", "request_absence", "sync_1on1"},
-		},
-		domain.RoleMentor: {
-			ID:             "usr-mentor-01",
-			Name:           "Мария Козлова",
-			Role:           domain.RoleMentor,
-			RoleTitle:      "Senior Go Developer / Buddy",
-			Team:           "Авито Доставка",
-			Department:     "Транспорт и Логистика",
-			MentorName:     "-",
-			ManagerName:    "Дмитрий Волков",
-			AvatarInitials: "МК",
-			Permissions:    []string{"read_all_checklists", "review_requests", "view_intern_metrics"},
-		},
-		domain.RoleManager: {
-			ID:             "usr-manager-01",
-			Name:           "Дмитрий Волков",
-			Role:           domain.RoleManager,
-			RoleTitle:      "Engineering Manager",
-			Team:           "Авито Доставка",
-			Department:     "Транспорт и Логистика",
-			MentorName:     "-",
-			ManagerName:    "-",
-			AvatarInitials: "ДВ",
-			Permissions:    []string{"admin_all", "approve_absence", "approve_access", "view_headcount"},
-		},
+	tracker := telemetry.NewTracker(true)
+	if exec != nil && exec.Tracker == nil {
+		exec.Tracker = tracker
+	}
+	if agent != nil && agent.Tracker == nil {
+		agent.Tracker = tracker
+	}
+	return NewServerWithConfig(config.Load(), store, exec, kb, agent, tracker)
+}
+
+// NewServerWithConfig constructs an HTTP API server configured via config.Config and ClickstreamTracker.
+func NewServerWithConfig(
+	cfg config.Config,
+	store *mcp.Store,
+	exec *mcp.Executor,
+	kb *rag.KnowledgeBase,
+	agent *ai.AgentOrchestrator,
+	tracker telemetry.ClickstreamTracker,
+) *Server {
+	if store == nil {
+		store = mcp.NewStore()
+	}
+	if tracker == nil {
+		tracker = telemetry.NewTracker(cfg.FeatureFlags.ClickstreamAnalytics)
+	}
+	if exec == nil {
+		exec = mcp.NewExecutorWithDeps(store, kb, tracker)
+	}
+
+	activeUser, usersList, _, _, msgs, _ := store.GetFullSnapshot()
+	usersMap := make(map[domain.Role]domain.UserProfile, len(usersList))
+	for _, u := range usersList {
+		usersMap[u.Role] = u
 	}
 
 	return &Server{
-		Store:      store,
-		Executor:   exec,
-		KB:         kb,
-		Agent:      agent,
-		Messages:   []domain.ChatMessage{},
-		Users:      users,
-		ActiveRole: domain.RoleIntern,
-		FeatureFlags: map[string]bool{
-			"mcp_corporate_actions":    true,
-			"rbac_strict_enforcement":  true,
-			"clickstream_telemetry":    true,
-			"proactive_onboarding_bot": true,
-		},
-		GoVersion: "go1.27.3",
+		Store:          store,
+		Executor:       exec,
+		KB:             kb,
+		Agent:          agent,
+		Tracker:        tracker,
+		Messages:       msgs,
+		Users:          usersMap,
+		ActiveRole:     activeUser.Role,
+		FeatureFlags:   cfg.FeatureFlags.ToMap(),
+		AllowedOrigins: append([]string(nil), cfg.CORSAllowedOrigins...),
+		GoVersion:      runtime.Version(),
 	}
 }
 
+// Routes mounts all REST endpoints under /api/v1 and wraps them with CORS and latency telemetry.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/context", s.handleGetContext)
 	mux.HandleFunc("POST /api/v1/auth/switch-role", s.handleSwitchRole)
 	mux.HandleFunc("PATCH /api/v1/onboarding/checklist/{itemId}", s.handleUpdateChecklist)
 	mux.HandleFunc("GET /api/v1/chat/messages", s.handleGetMessages)
-	mux.HandleFunc("POST /api/v1/chat/message", s.handleSendMessage)
+	mux.HandleFunc("POST /api/v1/chat/message", s.handlePostMessage)
 	mux.HandleFunc("POST /api/v1/chat/reset", s.handleReset)
 	mux.HandleFunc("POST /api/v1/corporate/actions/confirm", s.handleConfirmAction)
 	mux.HandleFunc("POST /api/v1/corporate/requests/{requestId}/review", s.handleReviewRequest)
-	mux.HandleFunc("GET /api/v1/knowledge", s.handleListKnowledge)
+	mux.HandleFunc("GET /api/v1/knowledge", s.handleKnowledge)
 
-	return s.corsMiddleware(mux)
+	return s.corsAndTelemetryMiddleware(mux)
 }
 
-func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+// StartProactiveHintWorker periodically evaluates onboarding state and inserts non-intrusive
+// reminder hints when FF_ENABLE_PROACTIVE_CRON_HINTS is enabled.
+func (s *Server) StartProactiveHintWorker(ctx context.Context, interval time.Duration) {
+	if !s.flagEnabled("proactive_cron_hints") || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.TriggerProactiveHint()
+			}
+		}
+	}()
+}
+
+// TriggerProactiveHint generates a one-time onboarding nudge if the user has pending steps
+// and the hint has not already been posted in the current session.
+func (s *Server) TriggerProactiveHint() *domain.ChatMessage {
+	if !s.flagEnabled("proactive_cron_hints") {
+		return nil
+	}
+	const hintID = "msg-proactive-hint-01"
+	if s.Store.HasMessageID(hintID) {
+		return nil
+	}
+
+	activeUser, _, ob, _, _, _ := s.Store.GetFullSnapshot()
+	if activeUser.Role != domain.RoleIntern || ob.NextRecommendedStep == nil {
+		return nil
+	}
+
+	hint := domain.ChatMessage{
+		ID:          hintID,
+		Sender:      "assistant",
+		RoleContext: domain.RoleIntern,
+		Content: fmt.Sprintf(
+			"💡 **Проактивная подсказка AI-buddy:** ваш текущий прогресс — **%d%%**. Следующий шаг чек-листа — *«%s»*. Если готовы, просто нажмите на карточку шага слева или спросите меня!",
+			ob.OverallProgress, ob.NextRecommendedStep.Title,
+		),
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ProcessingSteps: []string{"Proactive Cron Hint Engine: проверка прогресса онбординга"},
+		EngineUsed:      "proactive_cron_hint",
+	}
+	s.Store.AppendMessages(hint)
+	if s.Tracker != nil {
+		s.Tracker.Record(telemetry.ClickstreamEvent{
+			EventType: telemetry.EventProactiveHintCreated,
+			ActorRole: activeUser.Role,
+			Metadata:  map[string]string{"next_step": ob.NextRecommendedStep.ID},
+		})
+	}
+	return &hint
+}
+
+func (s *Server) flagEnabled(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.FeatureFlags == nil {
+		return false
+	}
+	return s.FeatureFlags[key]
+}
+
+func (s *Server) resolveRequestRole(r *http.Request) domain.Role {
+	if hdr := strings.TrimSpace(r.Header.Get("X-User-Role")); hdr != "" {
+		candidate := domain.Role(hdr)
+		if _, ok := s.Store.GetActiveUser(candidate); ok {
+			return candidate
+		}
+	}
+	user, _ := s.Store.GetActiveUser("")
+	if user.Role == "" {
+		return domain.RoleIntern
+	}
+	return user.Role
+}
+
+func (s *Server) corsAndTelemetryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+		origin := r.Header.Get("Origin")
+		if allowOrigin := s.matchAllowedOrigin(origin); allowOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Role")
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+
+		start := time.Now()
 		next.ServeHTTP(w, r)
+
+		// Record sub-second SLA telemetry for local API endpoints (excluding external LLM calls).
+		if s.Tracker != nil && r.URL.Path != "/api/v1/chat/message" {
+			elapsed := time.Since(start)
+			s.Tracker.RecordLatency(r.URL.Path, s.resolveRequestRole(r), elapsed)
+			avgMs := int(math.Round(s.Tracker.AvgLocalLatencyMs()))
+			if avgMs < 1 {
+				avgMs = 1
+			}
+			s.Store.SetAvgLatencyMs(avgMs)
+		}
 	})
 }
 
-func (s *Server) getCallerUser(r *http.Request) domain.UserProfile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	headerRole := domain.Role(r.Header.Get("X-User-Role"))
-	if u, ok := s.Users[headerRole]; ok {
-		return u
+func (s *Server) matchAllowedOrigin(origin string) string {
+	if origin == "" {
+		return "*"
 	}
-	return s.Users[s.ActiveRole]
+	if len(s.AllowedOrigins) == 0 {
+		return "*"
+	}
+	for _, allowed := range s.AllowedOrigins {
+		if allowed == "*" {
+			return "*"
+		}
+		if strings.EqualFold(strings.TrimSpace(allowed), strings.TrimSpace(origin)) {
+			return origin
+		}
+	}
+	// Preserve seamless dev access when explicit list doesn't reject localhost dev servers.
+	return ""
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	provider := "smart_fallback"
+	model := "deterministic-sdd-engine"
+	configured := false
 
-	resp := map[string]interface{}{
+	if s.Agent != nil {
+		if s.Agent.Config.Provider != "" {
+			provider = s.Agent.Config.Provider
+		}
+		if s.Agent.Config.Model != "" {
+			model = s.Agent.Config.Model
+		}
+		configured = strings.TrimSpace(s.Agent.Config.APIKey) != ""
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":                "ok",
 		"go_version":            s.GoVersion,
-		"llm_provider":          s.Agent.Config.Provider,
-		"llm_model":             s.Agent.Config.Model,
-		"live_llm_configured":   s.Agent.Config.APIKey != "",
-		"local_latency_ms":      1,
-		"disclaimer":            "Синтетический прототип для хакатона Avito Start (Hack&Change 2026)",
-	}
-	writeJSON(w, http.StatusOK, resp)
+		"llm_provider":          provider,
+		"model":                 model,
+		"fallback_ready":        true,
+		"openrouter_configured": configured,
+		"storage_mode":          s.Store.RepositoryMode(),
+	})
 }
 
 func (s *Server) handleGetContext(w http.ResponseWriter, r *http.Request) {
-	user := s.getCallerUser(r)
-
-	onboarding, corporateRequests, metrics := s.Store.GetSnapshot()
-
-	var availableRoles []domain.UserProfile
-	s.mu.RLock()
-	for _, u := range s.Users {
-		availableRoles = append(availableRoles, u)
+	_, availableRoles, onboarding, requests, _, metrics := s.Store.GetFullSnapshot()
+	activeRole := s.resolveRequestRole(r)
+	currentUser, ok := s.Store.GetActiveUser(activeRole)
+	if !ok && len(availableRoles) > 0 {
+		currentUser = availableRoles[0]
+		activeRole = currentUser.Role
 	}
-	ff := s.FeatureFlags
+
+	s.mu.RLock()
+	ff := make(map[string]bool, len(s.FeatureFlags))
+	for k, v := range s.FeatureFlags {
+		ff[k] = v
+	}
 	s.mu.RUnlock()
 
-	resp := map[string]interface{}{
-		"current_user":       user,
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active_role":        activeRole,
+		"current_user":       currentUser,
 		"available_roles":    availableRoles,
 		"onboarding":         onboarding,
-		"corporate_requests": corporateRequests,
+		"corporate_requests": requests,
 		"metrics":            metrics,
 		"feature_flags":      ff,
-	}
-	writeJSON(w, http.StatusOK, resp)
+		"disclaimer":         "Демо-прототип AI-buddy (Hack&Change 2026): регламенты, сотрудники и корпоративные сервисы (Absence, IDM) являются синтетическими имитациями.",
+	})
 }
 
 func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
@@ -171,21 +296,33 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 		Role domain.Role `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON body"})
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Некорректный формат запроса")
+		return
+	}
+
+	user, err := s.Store.SetActiveRole(body.Role)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ROLE", "Неизвестная роль: "+string(body.Role))
 		return
 	}
 
 	s.mu.Lock()
-	if _, ok := s.Users[body.Role]; !ok {
-		s.mu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Unknown role"})
-		return
-	}
-	s.ActiveRole = body.Role
-	updatedUser := s.Users[body.Role]
+	s.ActiveRole = user.Role
 	s.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, updatedUser)
+	if s.Tracker != nil {
+		s.Tracker.Record(telemetry.ClickstreamEvent{
+			EventType: telemetry.EventRoleSwitched,
+			ActorRole: user.Role,
+			ActorID:   user.ID,
+			Route:     r.URL.Path,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active_role":  user.Role,
+		"current_user": user,
+	})
 }
 
 func (s *Server) handleUpdateChecklist(w http.ResponseWriter, r *http.Request) {
@@ -194,78 +331,89 @@ func (s *Server) handleUpdateChecklist(w http.ResponseWriter, r *http.Request) {
 		Status domain.ChecklistItemStatus `json:"status"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Некорректное тело запроса")
 		return
 	}
 
-	updatedState, err := s.Executor.UpdateChecklistItem(itemID, body.Status)
+	state, err := s.Executor.UpdateChecklistItem(itemID, body.Status)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		switch {
+		case errors.Is(err, mcp.ErrInvalidStatus):
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", err.Error())
+		case errors.Is(err, mcp.ErrNotFound):
+			writeError(w, http.StatusNotFound, "ITEM_NOT_FOUND", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "CHECKLIST_ERROR", err.Error())
+		}
 		return
 	}
 
-	writeJSON(w, http.StatusOK, updatedState)
+	writeJSON(w, http.StatusOK, state)
 }
 
-func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	msgs := make([]domain.ChatMessage, len(s.Messages))
-	copy(msgs, s.Messages)
-	s.mu.RUnlock()
-
-	writeJSON(w, http.StatusOK, msgs)
+func (s *Server) handleGetMessages(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Store.ListMessages())
 }
 
-func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
-	user := s.getCallerUser(r)
-
+func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Content      string `json:"content"`
-		ScenarioHint string `json:"scenario_hint"`
+		Content      string      `json:"content"`
+		ScenarioHint string      `json:"scenario_hint"`
+		Role         domain.Role `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Content) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Поле 'content' обязательно"})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Некорректный JSON")
+		return
+	}
+	if strings.TrimSpace(body.Content) == "" {
+		writeError(w, http.StatusBadRequest, "EMPTY_MESSAGE", "Сообщение не может быть пустым")
 		return
 	}
 
-	now := time.Now().Format("2006-01-02 15:04:05")
+	activeRole := s.resolveRequestRole(r)
+	if body.Role != "" {
+		if _, ok := s.Store.GetActiveUser(body.Role); ok {
+			activeRole = body.Role
+		}
+	}
+	user, _ := s.Store.GetActiveUser(activeRole)
+
 	userMsg := domain.ChatMessage{
-		ID:          fmt.Sprintf("msg-user-%d", time.Now().UnixNano()),
+		ID:          fmt.Sprintf("msg-usr-%d", time.Now().UTC().UnixNano()),
 		Sender:      "user",
-		RoleContext: user.Role,
-		Content:     body.Content,
-		CreatedAt:   now,
+		RoleContext: activeRole,
+		Content:     strings.TrimSpace(body.Content),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	botMsg, err := s.Agent.ProcessMessage(r.Context(), user, body.Content, body.ScenarioHint)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "AGENT_ERROR", err.Error())
 		return
 	}
 
-	s.mu.Lock()
-	s.Messages = append(s.Messages, userMsg, *botMsg)
-	s.mu.Unlock()
+	s.Store.AppendMessages(userMsg, *botMsg)
 
-	onboarding, corporateRequests, metrics := s.Store.IncrementQuestionsResolved()
-
-	resp := map[string]interface{}{
+	onboarding, requests, metrics := s.Store.GetSnapshot()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"user_message":       userMsg,
 		"assistant_message":  botMsg,
 		"onboarding":         onboarding,
-		"corporate_requests": corporateRequests,
+		"corporate_requests": requests,
 		"metrics":            metrics,
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	s.Messages = []domain.ChatMessage{}
-	s.ActiveRole = domain.RoleIntern
-	s.mu.Unlock()
-
 	s.Store.Reset()
+	if s.Tracker != nil {
+		s.Tracker.Reset()
+	}
+
+	s.mu.Lock()
+	s.ActiveRole = domain.RoleIntern
+	s.Messages = nil
+	s.mu.Unlock()
 
 	s.handleGetContext(w, r)
 }
@@ -274,76 +422,104 @@ func (s *Server) handleConfirmAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequestID string `json:"request_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RequestID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request_id is required"})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Некорректный JSON")
+		return
+	}
+	if strings.TrimSpace(body.RequestID) == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_REQUEST_ID", "Не указан request_id")
 		return
 	}
 
 	updated, err := s.Executor.ConfirmAction(body.RequestID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		if errors.Is(err, mcp.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "ACTION_NOT_FOUND", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "CONFIRM_ERROR", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, updated)
+	onboarding, requests, metrics := s.Store.GetSnapshot()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"request":            updated,
+		"onboarding":         onboarding,
+		"corporate_requests": requests,
+		"metrics":            metrics,
+	})
 }
 
 func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
-	user := s.getCallerUser(r)
 	requestID := r.PathValue("requestId")
-
 	var body struct {
 		Decision string `json:"decision"`
 		Comment  string `json:"comment"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Некорректный JSON")
 		return
 	}
 
-	if !rbac.CanReviewRequest(user.Role) {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "Недостаточно прав: стажёр не может согласовать заявку",
-			"code":  "RBAC_FORBIDDEN",
-			"role":  string(user.Role),
-		})
-		return
-	}
-
-	updated, err := s.Executor.ReviewRequest(user.Role, requestID, body.Decision, body.Comment)
+	activeRole := s.resolveRequestRole(r)
+	updated, err := s.Executor.ReviewRequest(activeRole, requestID, body.Decision, body.Comment)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		switch {
+		case errors.Is(err, mcp.ErrForbidden):
+			writeError(w, http.StatusForbidden, "RBAC_FORBIDDEN", err.Error())
+		case errors.Is(err, mcp.ErrInvalidDecision):
+			writeError(w, http.StatusBadRequest, "INVALID_DECISION", err.Error())
+		case errors.Is(err, mcp.ErrNotFound):
+			writeError(w, http.StatusNotFound, "REQUEST_NOT_FOUND", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "REVIEW_ERROR", err.Error())
+		}
 		return
 	}
 
-	writeJSON(w, http.StatusOK, updated)
+	_, requests, _ := s.Store.GetSnapshot()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"request":            updated,
+		"corporate_requests": requests,
+	})
 }
 
-func (s *Server) handleListKnowledge(w http.ResponseWriter, r *http.Request) {
-	user := s.getCallerUser(r)
-	query := r.URL.Query().Get("q")
+func (s *Server) handleKnowledge(w http.ResponseWriter, r *http.Request) {
+	activeRole := s.resolveRequestRole(r)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	var articles []domain.KnowledgeArticle
+	var hiddenCount int
 
 	if query != "" {
-		res := s.KB.Search(user.Role, query, 10)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"role":                  user.Role,
-			"visible_articles":      res.Articles,
-			"hidden_by_rbac_count":  res.HiddenByRBACCount,
-			"total_articles_count":  res.TotalArticlesCount,
-		})
-		return
+		res := s.KB.Search(activeRole, query, 10)
+		articles = res.Articles
+		hiddenCount = res.HiddenByRBACCount
+	} else {
+		articles, hiddenCount = s.KB.ListAllVisible(activeRole)
 	}
 
-	visible, hidden := s.KB.ListAllVisible(user.Role)
+	if articles == nil {
+		articles = make([]domain.KnowledgeArticle, 0)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"role":                 user.Role,
-		"visible_articles":     visible,
-		"hidden_by_rbac_count": hidden,
+		"items":                articles,
+		"hidden_by_rbac_count": hiddenCount,
+		"active_role":          activeRole,
+		"disclaimer":           "Синтетическая база знаний прототипа AI-buddy с RBAC-фильтрацией чувствительности.",
 	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]string{
+		"code":    code,
+		"message": message,
+	})
 }

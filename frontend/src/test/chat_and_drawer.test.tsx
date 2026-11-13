@@ -1,103 +1,108 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import React from 'react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { ChatWorkspace } from '../components/ChatWorkspace'
-import { KnowledgeDrawer } from '../components/KnowledgeDrawer'
-import { useAppStore } from '../store/useAppStore'
+import { KnowledgePage } from '../pages/KnowledgePage'
+import { queryKeys } from '../api/queries'
 import * as api from '../api/client'
-
-describe('ChatWorkspace and KnowledgeDrawer', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks()
-    useAppStore.setState({
-      messages: [],
-      isAgentTyping: false,
-      isKnowledgeDrawerOpen: false,
-      activeRole: 'intern',
-    })
+import { context, knowledge, message } from './fixtures'
+import { createTestClient, deferred, renderWithClient } from './query-utils'
+import type { KnowledgeListResponse } from '../types'
+let client = createTestClient()
+const render = (ui: React.ReactNode, path = '/') => renderWithClient(ui, client, path)
+describe('Chat and knowledge pages', () => {
+  beforeEach(() => { vi.restoreAllMocks(); client = createTestClient() })
+  it('retains all four real scenario handlers without truncated labels', () => {
+    const send = vi.fn()
+    render(<ChatWorkspace onSendMessage={send} onConfirmAction={vi.fn()} isSending={false} />)
+    for (const name of ['Получить доступ', 'Проверить права', 'Оформить отгул', 'Подготовить 1:1']) fireEvent.click(screen.getByText(name))
+    expect(send.mock.calls.map(call => call[1])).toEqual(['scenario_01_access_and_rbac', 'rbac_guardrail_test', 'scenario_02_absence_day_off', 'scenario_03_first_task_and_mentor_1on1'])
   })
-
-  it('renders quick presets and triggers send on click', () => {
-    const onSend = vi.fn()
-    const onConfirm = vi.fn()
-
-    render(<ChatWorkspace onSendMessage={onSend} onConfirmAction={onConfirm} isSending={false} />)
-
-    const presetBtn = screen.getByText(/Сценарий 1: Доступы в IDM/i)
-    fireEvent.click(presetBtn)
-
-    expect(onSend).toHaveBeenCalledWith(
-      expect.stringContaining('Какие доступы'),
-      'scenario_01_access_and_rbac',
-    )
+  it('submits Enter, preserves Shift+Enter, ignores empty input and repeated submission', () => {
+    const send = vi.fn()
+    const { rerender } = render(<ChatWorkspace onSendMessage={send} onConfirmAction={vi.fn()} isSending={false} />)
+    const input = screen.getByLabelText('Сообщение AI-buddy')
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(send).not.toHaveBeenCalled()
+    fireEvent.change(input, { target: { value: 'Мой вопрос' } })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(send).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(send).toHaveBeenCalledWith('Мой вопрос', undefined)
+    rerender(<ChatWorkspace onSendMessage={send} onConfirmAction={vi.fn()} isSending={true} />)
+    expect(screen.getByRole('button', { name: 'Отправить сообщение' })).toBeDisabled()
+    expect(screen.getByText('AI-buddy готовит ответ')).toBeInTheDocument()
   })
-
-  it('submits text from input field', () => {
-    const onSend = vi.fn()
-    const onConfirm = vi.fn()
-
-    render(<ChatWorkspace onSendMessage={onSend} onConfirmAction={onConfirm} isSending={false} />)
-
-    const input = screen.getByPlaceholderText(/Задай вопрос/i)
-    fireEvent.change(input, { target: { value: 'Тестовый вопрос' } })
-
-    const submitBtn = screen.getByText('Отправить')
-    fireEvent.click(submitBtn)
-
-    expect(onSend).toHaveBeenCalledWith('Тестовый вопрос')
-  })
-
-  it('displays message with processing steps and citations', () => {
-    useAppStore.setState({
-      messages: [
-        {
-          id: 'msg-1',
-          sender: 'assistant',
-          role_context: 'intern',
-          content: 'Ответ помощника',
-          created_at: '2026-11-09 12:00:00',
-          processing_steps: ['Шаг 1: Поиск в Playbook'],
-          citations: [
-            { id: 'c1', title: 'AvitoTech Guide', source: 'Playbook', sensitivity: 'intern' },
-          ],
-        },
-      ],
-    })
-
+  it('renders returned steps, internal source links and readable time', () => {
+    client.setQueryData(queryKeys.messages, [{ ...message, content: '**Ответ**', processing_steps: ['Поиск выполнен'], citations: [{ id: 'kb-1', title: 'Playbook', source: 'Guide', sensitivity: 'intern' }] }])
     render(<ChatWorkspace onSendMessage={vi.fn()} onConfirmAction={vi.fn()} isSending={false} />)
-
-    expect(screen.getByText('Ответ помощника')).toBeInTheDocument()
-    expect(screen.getByText('Шаг 1: Поиск в Playbook')).toBeInTheDocument()
-    expect(screen.getByText('AvitoTech Guide')).toBeInTheDocument()
+    expect(screen.getByText('Ответ').tagName).toBe('STRONG')
+    fireEvent.click(screen.getByText(/Как подготовлен ответ/))
+    expect(screen.getByText('Поиск выполнен')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Playbook' })).toHaveAttribute('href', '/knowledge?article=kb-1')
+    expect(document.querySelector('time')).not.toHaveTextContent('2026-11-13T')
   })
-
-  it('renders KnowledgeDrawer and fetches articles', async () => {
-    vi.spyOn(api, 'fetchKnowledge').mockResolvedValueOnce({
-      role: 'intern',
-      visible_articles: [
-        {
-          id: 'kb-1',
-          title: 'Стандарты Go в Авито',
-          category: 'engineering',
-          sensitivity: 'intern',
-          source: 'Playbook',
-          summary: 'Гайд по Go 1.27.3',
-          content: 'Полный текст',
-          tags: ['go'],
-        },
-      ],
-      hidden_by_rbac_count: 2,
-    })
-
-    useAppStore.setState({ isKnowledgeDrawerOpen: true })
-
-    render(<KnowledgeDrawer />)
-
-    expect(screen.getByText('База знаний AvitoTech')).toBeInTheDocument()
-
-    await waitFor(() => {
-      expect(screen.getByText('Стандарты Go в Авито')).toBeInTheDocument()
-      expect(screen.getByText(/Скрыто политикой/i)).toBeInTheDocument()
-    })
+  it('does not force scrolling when the user is reading old messages', () => {
+    const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+    const { rerender } = render(<ChatWorkspace onSendMessage={vi.fn()} onConfirmAction={vi.fn()} isSending={false} />)
+    const history = screen.getByLabelText('История сообщений')
+    Object.defineProperties(history, { scrollHeight: { value: 2000, configurable: true }, clientHeight: { value: 400, configurable: true } })
+    fireEvent.scroll(history, { target: { scrollTop: 0 } })
+    scroll.mockClear()
+    act(() => client.setQueryData(queryKeys.messages, [message]))
+    rerender(<ChatWorkspace onSendMessage={vi.fn()} onConfirmAction={vi.fn()} isSending={false} />)
+    expect(scroll).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('К новым сообщениям'))
+    expect(scroll).toHaveBeenCalled()
+  })
+  it('restores typed input on API failure and updates a prepared prompt', () => {
+    const { rerender } = render(<ChatWorkspace onSendMessage={vi.fn()} onConfirmAction={vi.fn()} isSending={false} initialDraft="Вопрос к наставнику" initialHint="hint" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить сообщение' }))
+    rerender(<ChatWorkspace onSendMessage={vi.fn()} onConfirmAction={vi.fn()} isSending={false} initialDraft="Вопрос к наставнику" sendError="Ошибка" />)
+    expect(screen.getByLabelText('Сообщение AI-buddy')).toHaveValue('Вопрос к наставнику')
+  })
+  it('loads real items, opens the article and supports direct article URLs', async () => {
+    vi.spyOn(api, 'fetchKnowledge').mockResolvedValue(knowledge)
+    render(<KnowledgePage />, '/knowledge?article=kb-1')
+    expect(await screen.findByText('Полный текст')).toBeInTheDocument()
+    expect(screen.getByText(/Недоступно вашей роли: 2/)).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Закрыть статью'))
+    await waitFor(() => expect(screen.queryByText('Полный текст')).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /Читать:/ }))
+    await screen.findByText('Полный текст')
+  })
+  it('searches, displays empty results, clears query and reports inaccessible articles', async () => {
+    vi.spyOn(api, 'fetchKnowledge').mockImplementation(async (_, query) => query ? { ...knowledge, items: [] } : knowledge)
+    render(<KnowledgePage />)
+    await screen.findByText(knowledge.items[0].title)
+    fireEvent.change(screen.getByLabelText('Поиск по базе знаний'), { target: { value: 'нет совпадений' } })
+    fireEvent.click(screen.getByText('Найти'))
+    await screen.findByText('Ничего не найдено')
+    expect(api.fetchKnowledge).toHaveBeenLastCalledWith('intern', 'нет совпадений', expect.any(AbortSignal))
+    fireEvent.click(screen.getByText('Сбросить поиск'))
+    await screen.findByText(knowledge.items[0].title)
+  })
+  it('shows a backend error and retries without inventing success data', async () => {
+    vi.spyOn(api, 'fetchContext').mockResolvedValue(context)
+    vi.spyOn(api, 'fetchKnowledge').mockRejectedValueOnce(new api.ApiError('База знаний недоступна', 'KB_ERROR', 503)).mockResolvedValue(knowledge)
+    render(<KnowledgePage />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Сервис временно недоступен')
+    expect(screen.queryByText('База знаний недоступна')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Повторить'))
+    await screen.findByText(knowledge.items[0].title)
+  })
+  it('isolates knowledge by role and ignores stale results', async () => {
+    const old = deferred<KnowledgeListResponse>()
+    vi.spyOn(api, 'fetchKnowledge').mockReturnValueOnce(old.promise).mockResolvedValue({ ...knowledge, items: [] })
+    render(<KnowledgePage />)
+    await waitFor(() => expect(api.fetchKnowledge).toHaveBeenCalled())
+    await act(async () => { client.setQueryData(queryKeys.context, { ...context, active_role: 'mentor' }) })
+    await screen.findByText('Ничего не найдено')
+    await act(async () => old.resolve(knowledge))
+    expect(screen.queryByText(knowledge.items[0].title)).not.toBeInTheDocument()
+  })
+  it('reports an unknown or forbidden article without exposing its contents', async () => {
+    vi.spyOn(api, 'fetchKnowledge').mockResolvedValue({ ...knowledge, items: [] })
+    render(<KnowledgePage />, '/knowledge?article=private-id')
+    expect(await screen.findByText(/Статья не найдена/)).toBeInTheDocument()
   })
 })

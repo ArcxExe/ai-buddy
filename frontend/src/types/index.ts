@@ -58,7 +58,7 @@ export interface CorporateRequest {
   target_resource: string
   reviewer_comment?: string
   created_at: string
-  details: Record<string, any>
+  details: Record<string, unknown> | null
 }
 
 export interface KnowledgeCitation {
@@ -90,12 +90,14 @@ export interface ImpactMetrics {
 }
 
 export interface AppContextResponse {
+  active_role: Role
   current_user: UserProfile
   available_roles: UserProfile[]
   onboarding: OnboardingState
   corporate_requests: CorporateRequest[]
   metrics: ImpactMetrics
   feature_flags: Record<string, boolean>
+  disclaimer: string
 }
 
 export interface KnowledgeArticle {
@@ -106,5 +108,34 @@ export interface KnowledgeArticle {
   source: string
   summary: string
   content: string
-  tags: string[]
+  tags: string[] | null
 }
+
+export interface SwitchRoleRequest { role: Role }
+export interface SwitchRoleResponse { active_role: Role; current_user: UserProfile }
+export interface SendMessageRequest { content: string; scenario_hint?: string; role?: Role }
+export interface ChatResponse {
+  user_message: ChatMessage
+  assistant_message: ChatMessage
+  onboarding: OnboardingState
+  corporate_requests: CorporateRequest[]
+  metrics: ImpactMetrics
+}
+export interface ConfirmActionRequest { request_id: string }
+export interface ConfirmActionResponse {
+  request: CorporateRequest
+  onboarding: OnboardingState
+  corporate_requests: CorporateRequest[]
+  metrics: ImpactMetrics
+}
+export type ReviewDecision = 'approved' | 'rejected'
+export interface ReviewRequest { decision: ReviewDecision; comment?: string }
+export interface ReviewResponse { request: CorporateRequest; corporate_requests: CorporateRequest[] }
+export interface UpdateChecklistRequest { status: ChecklistStatus }
+export interface KnowledgeListResponse {
+  items: KnowledgeArticle[]
+  hidden_by_rbac_count: number
+  active_role: Role
+  disclaimer: string
+}
+export interface ErrorResponse { code: string; message: string }

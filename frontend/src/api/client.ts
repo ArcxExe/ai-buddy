@@ -1,98 +1,150 @@
-import { Role, AppContextResponse, ChatMessage, OnboardingState, CorporateRequest, KnowledgeArticle } from '../types'
+import type {
+  Role, AppContextResponse, ChatMessage, OnboardingState, ChecklistStatus,
+  SwitchRoleRequest, SwitchRoleResponse, SendMessageRequest, ChatResponse,
+  ConfirmActionRequest, ConfirmActionResponse, ReviewRequest, ReviewResponse,
+  ReviewDecision, UpdateChecklistRequest, KnowledgeListResponse, ErrorResponse,
+} from '../types'
+import type { ZodType } from 'zod'
+import {
+  chatSchema, confirmSchema, contextSchema, knowledgeSchema, messagesSchema,
+  onboardingSchema, reviewSchema, switchRoleSchema,
+} from './schemas'
 
 const API_BASE = '/api/v1'
 
-export async function fetchContext(role: Role): Promise<AppContextResponse> {
-  const res = await fetch(`${API_BASE}/context`, {
-    headers: { 'X-User-Role': role },
-  })
-  if (!res.ok) throw new Error('Failed to load context')
-  return res.json()
+export class ApiError extends Error {
+  constructor(message: string, readonly code: string, readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
 }
 
-export async function switchRole(role: Role) {
-  const res = await fetch(`${API_BASE}/auth/switch-role`, {
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status >= 500) return 'Сервис временно недоступен. Попробуйте позже.'
+  if (error instanceof ApiError && error.status === 400) return 'Проверьте параметры запроса.'
+  if (error instanceof ApiError && error.status === 403) return 'Операция отклонена сервером. Недостаточно прав.'
+  if (error instanceof ApiError && error.status === 404) return 'Данные не найдены. Обновите данные и повторите поиск.'
+  return error instanceof Error ? error.message : 'Не удалось выполнить запрос. Попробуйте ещё раз.'
+}
+
+async function readResponse<T>(response: Response, schema: ZodType<T>): Promise<T> {
+  if (!response.ok) {
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      // Proxies and the standard Go router may return a non-JSON error body.
+    }
+    if (typeof payload === 'object' && payload !== null &&
+        'code' in payload && typeof payload.code === 'string' &&
+        'message' in payload && typeof payload.message === 'string') {
+      const error: ErrorResponse = { code: payload.code, message: payload.message }
+      throw new ApiError(error.message, error.code, response.status)
+    }
+    throw new ApiError(`Ошибка сервера (HTTP ${response.status}). Попробуйте ещё раз.`, 'HTTP_ERROR', response.status)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new ApiError('Сервер вернул некорректный JSON. Попробуйте ещё раз.', 'INVALID_RESPONSE', response.status)
+  }
+  const result = schema.safeParse(payload)
+  if (!result.success) {
+    throw new ApiError('Сервер вернул данные неожиданного формата. Обновите данные или попробуйте позже.', 'INVALID_RESPONSE', response.status)
+  }
+  return result.data
+}
+
+async function request<T>(schema: ZodType<T>, path: string, init?: RequestInit): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, init)
+  } catch {
+    if (init?.signal?.aborted) throw init.signal.reason
+    throw new ApiError('Не удалось связаться с сервером. Проверьте подключение и повторите запрос.', 'NETWORK_ERROR', 0)
+  }
+  try {
+    return await readResponse(response, schema)
+  } catch (error) {
+    if (import.meta.env.DEV && import.meta.env.MODE !== 'test') console.error('API response error', error)
+    throw error
+  }
+}
+
+export async function fetchContext(role?: Role, signal?: AbortSignal): Promise<AppContextResponse> {
+  return request(contextSchema, `/context`, {
+    ...(role ? { headers: { 'X-User-Role': role } } : {}),
+    ...(signal ? { signal } : {}),
+  })
+}
+
+export async function switchRole(role: Role): Promise<SwitchRoleResponse> {
+  const body: SwitchRoleRequest = { role }
+  return request(switchRoleSchema, `/auth/switch-role`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ role }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('Failed to switch role')
-  return res.json()
 }
 
-export async function fetchMessages(): Promise<ChatMessage[]> {
-  const res = await fetch(`${API_BASE}/chat/messages`)
-  if (!res.ok) throw new Error('Failed to fetch messages')
-  return res.json()
+export async function fetchMessages(signal?: AbortSignal): Promise<ChatMessage[]> {
+  return request(messagesSchema, `/chat/messages`, signal ? { signal } : undefined)
 }
 
-export async function sendMessage(role: Role, content: string, scenarioHint?: string) {
-  const res = await fetch(`${API_BASE}/chat/message`, {
+export async function sendMessage(role: Role, content: string, scenarioHint?: string): Promise<ChatResponse> {
+  const body: SendMessageRequest = { content, scenario_hint: scenarioHint }
+  return request(chatSchema, `/chat/message`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-User-Role': role,
     },
-    body: JSON.stringify({ content, scenario_hint: scenarioHint }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('Failed to send message')
-  return res.json()
 }
 
 export async function resetChat(): Promise<AppContextResponse> {
-  const res = await fetch(`${API_BASE}/chat/reset`, { method: 'POST' })
-  if (!res.ok) throw new Error('Failed to reset chat')
-  return res.json()
+  return request(contextSchema, `/chat/reset`, { method: 'POST' })
 }
 
-export async function confirmCorporateAction(role: Role, requestId: string): Promise<CorporateRequest> {
-  const res = await fetch(`${API_BASE}/corporate/actions/confirm`, {
+export async function confirmCorporateAction(role: Role, requestId: string): Promise<ConfirmActionResponse> {
+  const body: ConfirmActionRequest = { request_id: requestId }
+  return request(confirmSchema, `/corporate/actions/confirm`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-User-Role': role,
     },
-    body: JSON.stringify({ request_id: requestId }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('Failed to confirm action')
-  return res.json()
 }
 
-export async function reviewCorporateRequest(role: Role, requestId: string, decision: 'approved' | 'rejected', comment: string): Promise<CorporateRequest> {
-  const res = await fetch(`${API_BASE}/corporate/requests/${requestId}/review`, {
+export async function reviewCorporateRequest(role: Role, requestId: string, decision: ReviewDecision, comment?: string): Promise<ReviewResponse> {
+  const body: ReviewRequest = { decision, comment }
+  return request(reviewSchema, `/corporate/requests/${encodeURIComponent(requestId)}/review`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-User-Role': role,
     },
-    body: JSON.stringify({ decision, comment }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.error || 'Review failed')
-  }
-  return res.json()
 }
 
-export async function updateChecklistStatus(itemId: string, status: string): Promise<OnboardingState> {
-  const res = await fetch(`${API_BASE}/onboarding/checklist/${itemId}`, {
+export async function updateChecklistStatus(itemId: string, status: ChecklistStatus): Promise<OnboardingState> {
+  const body: UpdateChecklistRequest = { status }
+  return request(onboardingSchema, `/onboarding/checklist/${encodeURIComponent(itemId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('Failed to update checklist item')
-  return res.json()
 }
 
-export async function fetchKnowledge(role: Role, query?: string): Promise<{
-  role: string
-  visible_articles: KnowledgeArticle[]
-  hidden_by_rbac_count: number
-}> {
-  const url = query ? `${API_BASE}/knowledge?q=${encodeURIComponent(query)}` : `${API_BASE}/knowledge`
-  const res = await fetch(url, {
+export async function fetchKnowledge(role: Role, query?: string, signal?: AbortSignal): Promise<KnowledgeListResponse> {
+  const path = query ? `/knowledge?q=${encodeURIComponent(query)}` : '/knowledge'
+  return request(knowledgeSchema, path, {
     headers: { 'X-User-Role': role },
+    ...(signal ? { signal } : {}),
   })
-  if (!res.ok) throw new Error('Failed to load knowledge articles')
-  return res.json()
 }

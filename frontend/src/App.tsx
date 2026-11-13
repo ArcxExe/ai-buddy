@@ -1,217 +1,83 @@
-import React, { useEffect, useState } from 'react'
-import { QueryClient, QueryClientProvider, useQuery, useMutation } from '@tanstack/react-query'
-import { useAppStore } from './store/useAppStore'
-import { fetchContext, fetchMessages, sendMessage, resetChat, confirmCorporateAction, reviewCorporateRequest, updateChecklistStatus, switchRole } from './api/client'
-import { Role, ChecklistStatus } from './types'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Info, LoaderCircle } from 'lucide-react'
+import { createQueryClient, useAppContext, useMessages, useWorkspaceActions } from './api/queries'
+import { getErrorMessage } from './api/client'
+import { Sidebar, navigation } from './components/Sidebar'
 import { Header } from './components/Header'
-import { OnboardingRoadmap } from './components/OnboardingRoadmap'
-import { ChatWorkspace } from './components/ChatWorkspace'
-import { MentorPanel } from './components/MentorPanel'
-import { KnowledgeDrawer } from './components/KnowledgeDrawer'
-import { ShieldCheck, Info } from 'lucide-react'
+import { useAppStore } from './store/useAppStore'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { Notice } from './components/ui/Notice'
+import { LoadingState } from './components/ui/LoadingState'
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      staleTime: 5000,
-    },
-  },
-})
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then(module => ({ default: module.DashboardPage })))
+const ChatPage = lazy(() => import('./pages/ChatPage').then(module => ({ default: module.ChatPage })))
+const OnboardingRoadmap = lazy(() => import('./components/OnboardingRoadmap').then(module => ({ default: module.OnboardingRoadmap })))
+const KnowledgePage = lazy(() => import('./pages/KnowledgePage').then(module => ({ default: module.KnowledgePage })))
+const RequestsPage = lazy(() => import('./pages/RequestsPage').then(module => ({ default: module.RequestsPage })))
 
-function MainApp() {
-  const {
-    activeRole,
-    setActiveRole,
-    setContext,
-    setMessages,
-    addMessage,
-    setAgentTyping,
-    updateOnboarding,
-    updateCorporateRequests,
-    updateMetrics,
-  } = useAppStore()
-
-  const [activeTab, setActiveTab] = useState<'onboarding' | 'mentor'>('onboarding')
-
-  // Context Query
-  const contextQuery = useQuery({
-    queryKey: ['context', activeRole],
-    queryFn: () => fetchContext(activeRole),
-  })
-
-  // Messages Query
-  const messagesQuery = useQuery({
-    queryKey: ['messages'],
-    queryFn: fetchMessages,
-  })
-
+export function MainApp() {
+  const contextQuery = useAppContext()
+  const messagesQuery = useMessages()
+  const action = useWorkspaceActions()
+  const busy = action.isPending || action.requiresRefresh || !contextQuery.data || contextQuery.isError
+  const chatBusy = busy || !messagesQuery.data || messagesQuery.isError
+  const isSending = action.isPending && action.variables?.type === 'send'
+  const location = useLocation()
+  const navigate = useNavigate()
+  const main = useRef<HTMLElement>(null)
+  const mobileOpen = useAppStore(state => state.isMobileNavOpen)
+  const closeNav = useAppStore(state => state.closeMobileNav)
+  const role = contextQuery.data?.active_role
   useEffect(() => {
-    if (contextQuery.data) {
-      setContext(contextQuery.data)
-      if (activeRole !== 'intern' && activeTab === 'onboarding') {
-        setActiveTab('mentor')
-      } else if (activeRole === 'intern' && activeTab === 'mentor') {
-        setActiveTab('onboarding')
-      }
-    }
-  }, [contextQuery.data, activeRole])
-
-  useEffect(() => {
-    if (messagesQuery.data) {
-      setMessages(messagesQuery.data)
-    }
-  }, [messagesQuery.data])
-
-  // Send Message Mutation
-  const sendMutation = useMutation({
-    mutationFn: ({ content, hint }: { content: string; hint?: string }) => {
-      setAgentTyping(true, 'Анализирую запрос и сверяюсь со стандартами команды...')
-      return sendMessage(activeRole, content, hint)
-    },
-    onSuccess: (data) => {
-      setAgentTyping(false)
-      addMessage(data.user_message)
-      addMessage(data.assistant_message)
-      updateOnboarding(data.onboarding)
-      updateCorporateRequests(data.corporate_requests)
-      updateMetrics(data.metrics)
-    },
-    onError: (err: any) => {
-      setAgentTyping(false)
-      alert('Ошибка при отправке: ' + err.message)
-    },
-  })
-
-  // Confirm Action Mutation
-  const confirmMutation = useMutation({
-    mutationFn: (requestId: string) => confirmCorporateAction(activeRole, requestId),
-    onSuccess: () => {
-      contextQuery.refetch()
-      messagesQuery.refetch()
-    },
-  })
-
-  // Review Action Mutation (for Mentor/Manager)
-  const reviewMutation = useMutation({
-    mutationFn: ({ id, decision, comment }: { id: string; decision: 'approved' | 'rejected'; comment: string }) =>
-      reviewCorporateRequest(activeRole, id, decision, comment),
-    onSuccess: () => {
-      contextQuery.refetch()
-    },
-  })
-
-  // Update Checklist Item Mutation
-  const checklistMutation = useMutation({
-    mutationFn: ({ itemId, status }: { itemId: string; status: ChecklistStatus }) =>
-      updateChecklistStatus(itemId, status),
-    onSuccess: (updatedState) => {
-      updateOnboarding(updatedState)
-    },
-  })
-
-  const handleRoleChange = async (role: Role) => {
-    try {
-      await switchRole(role)
-      setActiveRole(role)
-      if (role === 'intern') {
-        setActiveTab('onboarding')
-      } else {
-        setActiveTab('mentor')
-      }
-    } catch (e) {
-      console.error(e)
-    }
+    document.title = (navigation.find(item => item.to === location.pathname)?.label || 'Страница не найдена') + ' · AI-buddy'
+    main.current?.focus({ preventScroll: true })
+    closeNav()
+  }, [location.pathname, closeNav])
+  const handleReset = () => {
+    if (!busy && window.confirm('Сбросить историю чата и вернуть демо-состояние в исходный вид?')) action.execute({ type: 'reset' })
   }
-
-  const handleReset = async () => {
-    if (window.confirm('Сбросить историю чата и вернуть демо-состояние в исходный вид?')) {
-      const fresh = await resetChat()
-      setContext(fresh)
-      setMessages([])
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-[#F8F9FA] flex flex-col">
-      <Header onReset={handleReset} onRoleChange={handleRoleChange} />
-
-      {/* Synthetic Disclaimer Banner */}
-      <div className="bg-blue-50/80 border-b border-blue-100 px-4 py-1.5 text-center text-xs text-blue-900 font-medium flex items-center justify-center gap-2">
-        <Info className="w-3.5 h-3.5 text-avito-blue flex-shrink-0" />
-        <span>
-          <b>Демонстрационный прототип (Hack&Change 2026):</b> Все регламенты, сервисы (Absence, IDM) и сотрудники являются синтетическими имитациями.
-        </span>
-      </div>
-
-      {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Roadmap or Mentor Panel */}
-        <div className="lg:col-span-5 space-y-4">
-          {/* Mobile Tab Switcher */}
-          <div className="flex lg:hidden bg-gray-200 p-1 rounded-xl text-xs font-semibold">
-            <button
-              onClick={() => setActiveTab('onboarding')}
-              className={`flex-1 py-1.5 rounded-lg ${activeTab === 'onboarding' ? 'bg-white shadow-xs' : 'text-gray-600'}`}
-            >
-              Чек-лист стажёра
-            </button>
-            <button
-              onClick={() => setActiveTab('mentor')}
-              className={`flex-1 py-1.5 rounded-lg ${activeTab === 'mentor' ? 'bg-white shadow-xs' : 'text-gray-600'}`}
-            >
-              Панель наставника
-            </button>
-          </div>
-
-          <div className="hidden lg:block">
-            {activeRole === 'intern' ? (
-              <OnboardingRoadmap
-                onSelectPrompt={(p, hint) => sendMutation.mutate({ content: p, hint })}
-                onToggleChecklist={(id, status) => checklistMutation.mutate({ itemId: id, status })}
-              />
-            ) : (
-              <MentorPanel
-                onReview={(id, decision, comment) => reviewMutation.mutate({ id, decision, comment })}
-                isReviewing={reviewMutation.isPending}
-              />
-            )}
-          </div>
-
-          <div className="block lg:hidden">
-            {activeTab === 'onboarding' ? (
-              <OnboardingRoadmap
-                onSelectPrompt={(p, hint) => sendMutation.mutate({ content: p, hint })}
-                onToggleChecklist={(id, status) => checklistMutation.mutate({ itemId: id, status })}
-              />
-            ) : (
-              <MentorPanel
-                onReview={(id, decision, comment) => reviewMutation.mutate({ id, decision, comment })}
-                isReviewing={reviewMutation.isPending}
-              />
-            )}
-          </div>
+  const error = action.error || contextQuery.error || messagesQuery.error
+  const warning = action.requiresRefresh ? action.data?.warning || 'Результат операции не подтверждён. Обновите данные и проверьте результат перед повторным действием.' : undefined
+  const canRefresh = action.requiresRefresh || contextQuery.isError || messagesQuery.isError
+  const initialLoading = (!contextQuery.data || !messagesQuery.data) && (contextQuery.isFetching || messagesQuery.isFetching)
+  const confirming = action.isPending && action.variables?.type === 'confirm' ? action.variables.requestId : undefined
+  const reviewing = action.isPending && action.variables?.type === 'review' ? action.variables.requestId : undefined
+  return <div className="app-shell" aria-busy={action.isPending}>
+    <a className="skip-link" href="#main-content">Перейти к содержимому</a>
+    <Sidebar onReset={handleReset} isBusy={busy} />
+    <div className="app-workspace" inert={mobileOpen || undefined}>
+      <Header onRoleChange={newRole => action.execute({ type: 'role', role: newRole })} isBusy={busy} />
+      <main ref={main} tabIndex={-1} id="main-content">
+        <div className="workspace-notices">
+          {import.meta.env.DEV && <div className="demo-notice"><Info size={15} aria-hidden="true" /><span><strong>Демонстрационный прототип.</strong> Синтетические сотрудники, регламенты и сервисы · Hack&Change 2026</span></div>}
+          {(error || warning) && <Notice tone={error ? 'error' : 'warning'} action={canRefresh && <button className="button button-secondary" disabled={action.isPending} onClick={() => action.execute({ type: 'refresh' })}>{action.requiresRefresh ? 'Обновить данные' : 'Повторить'}</button>}>
+            {error && <span>{getErrorMessage(error)}</span>}{warning && <p>{warning}</p>}
+          </Notice>}
+          {(action.isPending && !isSending) || initialLoading ? <Notice tone="info"><LoaderCircle size={16} className="spin" aria-hidden="true" />{action.isPending ? action.variables?.type === 'refresh' ? 'Обновляем данные...' : 'Сохраняем изменения...' : 'Загружаем ваше пространство...'}</Notice> : null}
+          {!action.isPending && !initialLoading && contextQuery.data && (contextQuery.isFetching || messagesQuery.isFetching) && <Notice tone="info">Обновляем данные. Последний загруженный результат остаётся на экране.</Notice>}
+          {action.isSuccess && !error && !warning && action.variables?.type !== 'send' && <Notice tone={action.variables?.type === 'refresh' ? 'info' : 'success'}>{action.variables?.type === 'reset' ? 'Демо сброшено. Можно начать заново.' : action.variables?.type === 'refresh' ? 'Данные обновлены.' : 'Изменения сохранены.'}</Notice>}
         </div>
-
-        {/* Right Column: Chat Workspace */}
-        <div className="lg:col-span-7">
-          <ChatWorkspace
-            onSendMessage={(content, hint) => sendMutation.mutate({ content, hint })}
-            onConfirmAction={(requestId) => confirmMutation.mutate(requestId)}
-            isSending={sendMutation.isPending}
-          />
-        </div>
+        <ErrorBoundary key={location.pathname}>
+        <Suspense fallback={<div className="page"><LoadingState label="Загрузка раздела" /></div>}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/chat" element={<ChatPage onSendMessage={(content, hint) => action.execute({ type: 'send', content, hint })} onConfirmAction={requestId => action.execute({ type: 'confirm', requestId })} isSending={isSending} isBusy={chatBusy} confirmingRequestId={confirming} sendError={action.isError && action.variables?.type === 'send' ? getErrorMessage(action.error) : undefined} />} />
+          <Route path="/onboarding" element={<OnboardingRoadmap onSelectPrompt={(prompt, hint) => navigate('/chat', { state: { prompt, hint } })} onToggleChecklist={(itemId, status) => action.execute({ type: 'checklist', itemId, status })} isBusy={busy} />} />
+          <Route path="/knowledge" element={<KnowledgePage key={role} />} />
+          <Route path="/requests" element={<RequestsPage onConfirm={requestId => action.execute({ type: 'confirm', requestId })} onReview={(requestId, decision, comment) => action.execute({ type: 'review', requestId, decision, comment })} isBusy={busy} confirmingRequestId={confirming} reviewingRequestId={reviewing} />} />
+          <Route path="*" element={<div className="page"><div className="card empty-state"><h1>Страница не найдена</h1><p>Вернёмся к вашему пространству адаптации.</p><Link to="/" className="button button-dark">На главную</Link></div></div>} />
+        </Routes>
+        </Suspense>
+        </ErrorBoundary>
       </main>
-
-      <KnowledgeDrawer />
+      <footer className="app-footer"><span>AI-buddy · Avito Start</span><span>Учиться новому проще вместе.</span></footer>
     </div>
-  )
+  </div>
 }
 
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <MainApp />
-    </QueryClientProvider>
-  )
+export default function App({ client }: { client?: QueryClient } = {}) {
+  const [defaultClient] = useState(createQueryClient)
+  return <QueryClientProvider client={client ?? defaultClient}><ErrorBoundary><BrowserRouter><MainApp /></BrowserRouter></ErrorBoundary></QueryClientProvider>
 }

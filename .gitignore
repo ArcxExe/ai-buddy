@@ -1,6 +1,9 @@
 # Environment & Secrets
 .env
+.env.*
+!.env.example
 *.local
+*.log
 
 # Binaries & Build
 bin/

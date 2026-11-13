@@ -1,138 +1,106 @@
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
-import React from 'react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { screen, fireEvent } from '@testing-library/react'
 import { Header } from '../components/Header'
 import { OnboardingRoadmap } from '../components/OnboardingRoadmap'
 import { ActionCardView } from '../components/ActionCardView'
-import { MentorPanel } from '../components/MentorPanel'
-import { useAppStore } from '../store/useAppStore'
-import { CorporateRequest } from '../types'
-
-describe('Component Tests', () => {
-  it('renders Header with brand and role buttons', () => {
-    const handleRole = vi.fn()
-    const handleReset = vi.fn()
-    render(<Header onRoleChange={handleRole} onReset={handleReset} />)
-
-    expect(screen.getByText('AI-buddy')).toBeInTheDocument()
-    expect(screen.getByText('Avito Start')).toBeInTheDocument()
-
-    const mentorBtn = screen.getByText('Наставник (Мария)')
-    fireEvent.click(mentorBtn)
-    expect(handleRole).toHaveBeenCalledWith('mentor')
+import { RequestsPage } from '../pages/RequestsPage'
+import { DashboardPage } from '../pages/DashboardPage'
+import { Markdown } from '../components/ui/Markdown'
+import { formatDate, formatMessageTime } from '../lib/format'
+import { createTestClient, renderWithClient } from './query-utils'
+import { queryKeys } from '../api/queries'
+import { context, draft } from './fixtures'
+let client = createTestClient()
+const render = (ui: React.ReactNode) => renderWithClient(ui, client)
+describe('Product components', () => {
+  beforeEach(() => { client = createTestClient() })
+  it('renders safe Markdown with headings, emphasis, lists, links and code', () => {
+    render(<Markdown>{'# Заголовок\n\n**Важное** и *курсив* с `inline`\n\n- Первый пункт\n- Второй пункт\n\n1. Шаг один\n2. Шаг два\n\n~~~ts\nconst ready = true\n~~~\n\n[Документация](https://example.com)\n\n<script>alert(1)</script>\n\n![image](https://example.com/pixel)\n\n[Опасная ссылка](javascript:alert%281%29)'}</Markdown>)
+    expect(screen.getByRole('heading', { name: 'Заголовок' })).toBeInTheDocument()
+    expect(screen.getByText('Важное').tagName).toBe('STRONG')
+    expect(screen.getByText('курсив').tagName).toBe('EM')
+    expect(screen.getByText('inline').tagName).toBe('CODE')
+    expect(screen.getByText('const ready = true')).toBeInTheDocument()
+    expect(screen.getAllByRole('list')).toHaveLength(2)
+    expect(screen.getByRole('link', { name: 'Документация' })).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(document.querySelector('script')).toBeNull()
+    expect(document.querySelector('img')).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Опасная ссылка' })).toBeNull()
   })
-
-  it('renders OnboardingRoadmap with progress and checklist', () => {
-    useAppStore.setState({
-      onboarding: {
-        overall_progress: 40,
-        current_stage_id: 'stage-1',
-        stages: [
-          { id: 's1', title: 'День 1', period: 'День 1', status: 'completed', progress_percent: 100 },
-        ],
-        checklist: [
-          {
-            id: 'item-1',
-            stage_id: 's1',
-            title: 'Запросить доступы',
-            description: 'В Avito Access',
-            status: 'todo',
-            category: 'access',
-            estimated_time: '10 мин',
-            suggested_prompt: 'Запроси доступ',
-          },
-        ],
-      },
-    })
-
-    const onPrompt = vi.fn()
-    const onToggle = vi.fn()
-    render(<OnboardingRoadmap onSelectPrompt={onPrompt} onToggleChecklist={onToggle} />)
-
-    expect(screen.getByText('Дорожная карта адаптации')).toBeInTheDocument()
-    expect(screen.getByText('40%')).toBeInTheDocument()
-    expect(screen.getByText('Запросить доступы')).toBeInTheDocument()
+  it('formats local dates, today, yesterday and invalid values', () => {
+    const now = new Date(2026, 10, 13, 14, 0)
+    expect(formatMessageTime(new Date(2026, 10, 13, 12, 45).toISOString(), now)).toBe('Сегодня, 12:45')
+    expect(formatMessageTime(new Date(2026, 10, 12, 18, 30).toISOString(), now)).toBe('Вчера, 18:30')
+    expect(formatMessageTime(new Date(2026, 9, 1, 10, 0).toISOString(), now)).toContain('окт')
+    expect(formatMessageTime('invalid')).toBe('Дата не указана')
+    expect(formatDate('invalid')).toBe('Дата не указана')
+    expect(formatDate('2026-11-13T08:00:00Z')).toContain('2026')
   })
-
-  it('renders ActionCardView for RBAC blocked resource', () => {
-    const card: CorporateRequest = {
-      id: 'req-rbac',
-      service_name: 'Avito Access / IDM',
-      tool_name: 'request_service_access',
-      request_type: 'rbac_blocked',
-      title: 'Заблокирован доступ к prod-billing-db',
-      summary: 'Политика RBAC запрещает доступ стажёрам',
-      status: 'blocked_by_rbac',
-      created_by_role: 'intern',
-      target_resource: 'prod-billing-db',
-      created_at: '2026-11-09 12:00:00',
-      details: {},
-    }
-
-    render(<ActionCardView card={card} />)
-    expect(screen.getByText(/RBAC Guardrail/i)).toBeInTheDocument()
-    expect(screen.getByText('Заблокирован доступ к prod-billing-db')).toBeInTheDocument()
+  it('changes demo role through the header control', () => {
+    const onRole = vi.fn()
+    render(<Header onRoleChange={onRole} />)
+    fireEvent.change(screen.getByLabelText('Демонстрационная роль'), { target: { value: 'mentor' } })
+    expect(onRole).toHaveBeenCalledWith('mentor')
   })
-
-  it('renders ActionCardView draft and triggers confirm', () => {
+  it('shows all checklist statuses, descriptions and suggested prompts', () => {
+    const onStatus = vi.fn(), onPrompt = vi.fn()
+    client.setQueryData(queryKeys.context, { ...context, onboarding: {
+      ...context.onboarding, next_recommended_step: context.onboarding.checklist[0],
+      checklist: [...context.onboarding.checklist, { ...context.onboarding.checklist[0], id: 'second', title: 'Второй шаг', status: 'done' }],
+    } })
+    render(<OnboardingRoadmap onSelectPrompt={onPrompt} onToggleChecklist={onStatus} />)
+    fireEvent.change(screen.getByLabelText('Статус: Запросить доступы'), { target: { value: 'in_progress' } })
+    expect(onStatus).toHaveBeenCalledWith('step-1', 'in_progress')
+    fireEvent.click(screen.getAllByText('Обсудить с помощником')[0])
+    expect(onPrompt).toHaveBeenCalledWith('Запроси доступ')
+    fireEvent.click(screen.getByText('Спросить AI-buddy'))
+    expect(screen.getByText('Второй шаг')).toBeInTheDocument()
+    expect(screen.getAllByText('Готово').length).toBeGreaterThan(0)
+  })
+  it('shows actual dashboard metrics and the completed onboarding state', () => {
+    client.setQueryData(queryKeys.context, { ...context, onboarding: { ...context.onboarding, overall_progress: 100, checklist: context.onboarding.checklist.map(item => ({ ...item, status: 'done' })), next_recommended_step: undefined } })
+    render(<DashboardPage />)
+    expect(screen.getByRole('heading', { name: /Привет, Алексей/ })).toBeInTheDocument()
+    expect(screen.getByText('Все шаги завершены')).toBeInTheDocument()
+    expect(screen.getByText(/расчётная оценка/)).toBeInTheDocument()
+  })
+  it('renders action details with null, arrays, numbers and comments', () => {
+    const { rerender } = render(<ActionCardView card={{ ...draft, details: null }} />)
+    expect(screen.queryByText('Детали заявки')).not.toBeInTheDocument()
+    rerender(<ActionCardView card={{ ...draft, request_type: 'mentor_1on1_summary', reviewer_comment: 'Хороший план', details: { questions: ['Какие метрики?', { detail: true }], count: 2, reason: 'Подготовка', empty: null } }} />)
+    fireEvent.click(screen.getByText('Детали заявки'))
+    expect(screen.getByText('Какие метрики?')).toBeInTheDocument()
+    expect(screen.getByText('Хороший план')).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
+  })
+  it('shows RBAC rejection and its real summary', () => {
+    render(<ActionCardView card={{ ...draft, request_type: 'rbac_blocked', status: 'blocked_by_rbac', summary: 'Политика запрещает доступ' }} />)
+    expect(screen.getByText('Заблокировано правами')).toBeInTheDocument()
+    expect(screen.getByText('Политика запрещает доступ')).toBeInTheDocument()
+  })
+  it('confirms drafts and disables repeated confirmation', () => {
     const onConfirm = vi.fn()
-    const card: CorporateRequest = {
-      id: 'abs-1',
-      service_name: 'Avito Absence',
-      tool_name: 'create_absence_request',
-      request_type: 'absence_request',
-      title: 'Учебный отгул на 18 ноября',
-      summary: 'Экзамен в вузе',
-      status: 'draft_confirmation_required',
-      created_by_role: 'intern',
-      target_resource: 'absence:study_day_off',
-      created_at: '2026-11-09 12:00:00',
-      details: {},
-    }
-
-    render(<ActionCardView card={card} onConfirm={onConfirm} />)
-    expect(screen.getByText('Черновик (требует подтверждения)')).toBeInTheDocument()
-
-    const confirmBtn = screen.getByText('Подтвердить и отправить')
-    fireEvent.click(confirmBtn)
-    expect(onConfirm).toHaveBeenCalledWith('abs-1')
+    render(<ActionCardView card={draft} onConfirm={onConfirm} />)
+    fireEvent.click(screen.getByText('Подтвердить и отправить'))
+    expect(onConfirm).toHaveBeenCalledWith(draft.id)
   })
-
-  it('renders MentorPanel with approval buttons', () => {
+  it('allows mentor review with the typed comment and supports status filters', () => {
+    const request = { ...draft, status: 'pending_approval' as const }
+    client.setQueryData(queryKeys.context, { ...context, active_role: 'mentor', corporate_requests: [request] })
     const onReview = vi.fn()
-    useAppStore.setState({
-      activeRole: 'mentor',
-      corporateRequests: [
-        {
-          id: 'abs-pending',
-          service_name: 'Avito Absence',
-          tool_name: 'create_absence_request',
-          request_type: 'absence_request',
-          title: 'Заявка на отгул',
-          summary: 'Прошу согласовать',
-          status: 'pending_approval',
-          created_by_role: 'intern',
-          target_resource: 'absence',
-          created_at: '2026-11-09 12:00:00',
-          details: {},
-        },
-      ],
-      metrics: {
-        mentor_hours_baseline: 48,
-        mentor_hours_saved: 2.5,
-        routine_questions_resolved: 4,
-        mcp_actions_executed: 3,
-        rbac_violations_prevented: 1,
-        avg_local_latency_ms: 2,
-      },
-    })
-
-    render(<MentorPanel onReview={onReview} isReviewing={false} />)
-    expect(screen.getByText('Рабочее место наставника (Мария Козлова)')).toBeInTheDocument()
-    expect(screen.getByText('+2.5 ч')).toBeInTheDocument()
-
-    const approveBtn = screen.getByText('Согласовать')
-    fireEvent.click(approveBtn)
-    expect(onReview).toHaveBeenCalledWith('abs-pending', 'approved', expect.any(String))
+    render(<RequestsPage onConfirm={vi.fn()} onReview={onReview} isBusy={false} />)
+    fireEvent.change(screen.getByPlaceholderText('Необязательно'), { target: { value: 'Согласовано' } })
+    fireEvent.click(screen.getByText('Согласовать'))
+    expect(onReview).toHaveBeenCalledWith(draft.id, 'approved', 'Согласовано')
+    fireEvent.click(screen.getByText('Отклонить'))
+    expect(onReview).toHaveBeenCalledWith(draft.id, 'rejected', 'Согласовано')
+    fireEvent.change(screen.getByLabelText('Фильтр заявок'), { target: { value: 'completed' } })
+    expect(screen.getByText('Заявок с таким статусом нет')).toBeInTheDocument()
+  })
+  it('hides review actions from interns and confirmation for another role', () => {
+    client.setQueryData(queryKeys.context, { ...context, corporate_requests: [{ ...draft, status: 'pending_approval' }, { ...draft, id: 'other', created_by_role: 'mentor' }] })
+    render(<RequestsPage onConfirm={vi.fn()} onReview={vi.fn()} isBusy={false} />)
+    expect(screen.queryByText('Согласовать')).not.toBeInTheDocument()
+    expect(screen.queryByText('Подтвердить и отправить')).not.toBeInTheDocument()
   })
 })

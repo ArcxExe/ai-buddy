@@ -1,108 +1,43 @@
-import React from 'react'
-import { CorporateRequest } from '../types'
-import { ShieldAlert, CheckCircle, Clock, Calendar, Key, MessageSquare, Send } from 'lucide-react'
+import { Check, Send, X, ShieldAlert, KeyRound, CalendarDays, MessagesSquare } from 'lucide-react'
+import type { CorporateRequest, ReviewDecision } from '../types'
+import { StatusBadge } from './ui/StatusBadge'
+import { formatDate } from '../lib/format'
+import { useAppContext } from '../api/queries'
+import { draftKey, useDraft } from '../lib/drafts'
 
 interface ActionCardViewProps {
   card: CorporateRequest
   onConfirm?: (requestId: string) => void
   isConfirming?: boolean
+  isDisabled?: boolean
+  onReview?: (decision: ReviewDecision, comment: string) => void
+  isReviewing?: boolean
 }
-
-export const ActionCardView: React.FC<ActionCardViewProps> = ({ card, onConfirm, isConfirming }) => {
-  const isRBACBlocked = card.status === 'blocked_by_rbac' || card.request_type === 'rbac_blocked'
-  const isDraft = card.status === 'draft_confirmation_required'
-  const isApproved = card.status === 'approved' || card.status === 'completed'
-  const isPending = card.status === 'pending_approval'
-
-  if (isRBACBlocked) {
-    return (
-      <div className="mt-3 p-3.5 rounded-xl border border-red-200 bg-red-50/70 text-red-900 space-y-2">
-        <div className="flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-red-600 flex-shrink-0" />
-          <span className="text-xs font-bold uppercase tracking-wider text-red-700">
-            RBAC Guardrail • Доступ ограничен
-          </span>
-        </div>
-        <div className="text-xs font-semibold">{card.title}</div>
-        <p className="text-xs text-red-700/90 leading-relaxed">{card.summary}</p>
-        <div className="text-[10px] text-red-500 font-mono">
-          Ресурс: {card.target_resource} | Сервис: {card.service_name}
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="mt-3 p-4 rounded-xl border border-avito-border bg-white shadow-2xs space-y-3">
-      {/* Service badge & Status */}
-      <div className="flex items-center justify-between gap-2 border-b border-gray-100 pb-2">
-        <div className="flex items-center gap-2">
-          {card.request_type === 'access_request' && <Key className="w-4 h-4 text-avito-blue" />}
-          {card.request_type === 'absence_request' && <Calendar className="w-4 h-4 text-avito-green" />}
-          {card.request_type === 'mentor_1on1_summary' && <MessageSquare className="w-4 h-4 text-avito-purple" />}
-          <span className="text-xs font-bold text-gray-800">{card.service_name}</span>
-        </div>
-        <span
-          className={`text-[11px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 ${
-            isApproved
-              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-              : isDraft
-              ? 'bg-amber-50 text-amber-700 border border-amber-200'
-              : isPending
-              ? 'bg-blue-50 text-blue-700 border border-blue-200'
-              : 'bg-gray-100 text-gray-700'
-          }`}
-        >
-          {isApproved && <CheckCircle className="w-3 h-3 text-emerald-600" />}
-          {isPending && <Clock className="w-3 h-3 text-blue-600 animate-spin" />}
-          {card.status === 'draft_confirmation_required' && 'Черновик (требует подтверждения)'}
-          {card.status === 'pending_approval' && 'На согласовании'}
-          {card.status === 'approved' && 'Одобрено'}
-          {card.status === 'completed' && 'Зафиксировано'}
-          {card.status === 'rejected' && 'Отклонено'}
-        </span>
-      </div>
-
-      {/* Title & Summary */}
-      <div>
-        <h4 className="text-xs font-bold text-avito-dark">{card.title}</h4>
-        <p className="text-xs text-gray-600 mt-1 leading-relaxed">{card.summary}</p>
-      </div>
-
-      {/* 1:1 Questions Details */}
-      {card.request_type === 'mentor_1on1_summary' && card.details?.questions && (
-        <div className="space-y-1.5 bg-purple-50/50 p-2.5 rounded-lg border border-purple-100 text-xs">
-          <span className="font-semibold text-purple-900 block">Вопросы для синка с Марией:</span>
-          <ul className="list-disc list-inside space-y-1 text-purple-800 text-[11px]">
-            {(card.details.questions as string[]).map((q, idx) => (
-              <li key={idx}>{q}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Confirmation Action for Human-in-the-Loop (Slide 4 Case) */}
-      {isDraft && onConfirm && (
-        <div className="pt-1 flex items-center justify-between gap-3">
-          <span className="text-[11px] text-gray-500">
-            Действие не выполнится без твоего согласия
-          </span>
-          <button
-            onClick={() => onConfirm(card.id)}
-            disabled={isConfirming}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-avito-green hover:bg-avito-green-hover text-white rounded-lg text-xs font-bold shadow-xs transition"
-          >
-            <Send className="w-3 h-3" />
-            <span>{isConfirming ? 'Отправка...' : 'Подтвердить и отправить'}</span>
-          </button>
-        </div>
-      )}
-
-      {card.reviewer_comment && (
-        <div className="text-[11px] bg-gray-50 p-2 rounded-lg border border-gray-200 text-gray-700">
-          <span className="font-semibold">Комментарий согласующего:</span> {card.reviewer_comment}
-        </div>
-      )}
-    </div>
-  )
+const detailLabels: Record<string, string> = {
+  resource: 'Ресурс', access_level: 'Уровень доступа', reason: 'Причина', start_date: 'Начало', end_date: 'Окончание',
+  absence_type: 'Тип отсутствия', approver: 'Согласующий', buddy: 'Наставник', topic: 'Тема',
+  what_checked: 'Что уже проверено', questions: 'Вопросы к встрече', sla: 'Срок обработки', policy_rule: 'Правило доступа',
+}
+const detailValues: Record<string, string> = { study_day_off: 'Учебный отгул', personal_day_off: 'Личный отгул', vacation: 'Отпуск', read: 'Чтение', read_write: 'Чтение и запись', admin: 'Администрирование' }
+const requestTypes = { access_request: 'Доступ', absence_request: 'Отсутствие', mentor_1on1_summary: 'Встреча 1:1', rbac_blocked: 'Ограничение доступа' }
+function DetailValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) return <ul>{value.map((item: unknown, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
+  if (typeof value === 'string') return <>{detailValues[value] || value}</>
+  return <>{JSON.stringify(value)}</>
+}
+export function ActionCardView({ card, onConfirm, isConfirming, isDisabled, onReview, isReviewing }: ActionCardViewProps) {
+  const { data: context } = useAppContext()
+  const [comment, setComment] = useDraft(draftKey(context, 'review', card.id))
+  const blocked = card.status === 'blocked_by_rbac'
+  const Icon = blocked ? ShieldAlert : card.request_type === 'access_request' ? KeyRound : card.request_type === 'absence_request' ? CalendarDays : MessagesSquare
+  const details = Object.entries(card.details ?? {}).filter(([key, value]) => key !== 'synthetic' && value !== null && value !== undefined)
+  return <article className={'action-card' + (blocked ? ' action-blocked' : '')}>
+    <div className="action-top"><span className="action-service"><Icon size={17} aria-hidden="true" />{card.service_name}</span><StatusBadge status={card.status} /></div>
+    <h3>{card.title}</h3><p>{card.summary}</p>
+    <div className="action-meta"><span>{requestTypes[card.request_type]}</span><span>{formatDate(card.created_at)}</span><span>{card.id}</span></div>
+    {details.length > 0 && <details className="action-details"><summary>Детали заявки</summary><dl>{details.map(([key, value]) => <div key={key}><dt>{detailLabels[key] || key}</dt><dd><DetailValue value={value} /></dd></div>)}</dl></details>}
+    {card.reviewer_comment && <div className="reviewer-comment"><strong>Комментарий согласующего</strong><p>{card.reviewer_comment}</p></div>}
+    {card.status === 'draft_confirmation_required' && onConfirm && <div className="action-footer"><span>Отправим только после вашего подтверждения</span><button className="button button-primary" disabled={isDisabled || isConfirming} onClick={() => onConfirm(card.id)}><Send size={15} />{isConfirming ? 'Отправка...' : 'Подтвердить и отправить'}</button></div>}
+    {card.status === 'pending_approval' && onReview && <div className="review-form"><label>Комментарий к решению<textarea value={comment} onChange={event => setComment(event.target.value)} rows={2} disabled={isDisabled} placeholder="Необязательно" /></label><div className="button-row"><button className="button button-primary" disabled={isDisabled} onClick={() => onReview('approved', comment)}><Check size={16} />{isReviewing ? 'Сохранение...' : 'Согласовать'}</button><button className="button button-secondary" disabled={isDisabled} onClick={() => onReview('rejected', comment)}><X size={16} />Отклонить</button></div></div>}
+  </article>
 }

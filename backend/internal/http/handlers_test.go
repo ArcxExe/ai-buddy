@@ -62,6 +62,17 @@ func TestHealthEndpoint(t *testing.T) {
 	if body["status"] != "ok" || body["storage_mode"] != "memory" {
 		t.Errorf("unexpected health payload: %+v", body)
 	}
+	if body["llm_model"] != "test-model" || body["model"] != "test-model" {
+		t.Errorf("expected both llm_model and model to equal test-model, got llm_model=%v model=%v", body["llm_model"], body["model"])
+	}
+	if body["live_llm_configured"] != false || body["openrouter_configured"] != false {
+		t.Errorf("expected both live_llm_configured and openrouter_configured to be false, got live=%v openrouter=%v", body["live_llm_configured"], body["openrouter_configured"])
+	}
+	for _, key := range []string{"go_version", "llm_provider", "fallback_ready"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("expected %q in health payload", key)
+		}
+	}
 }
 
 func TestContextEndpointAndDeterministicRolesOrder(t *testing.T) {
@@ -361,4 +372,155 @@ func TestConcurrentAPIRequestsUnderRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func assertTopLevelCorporateRequestFields(t *testing.T, raw map[string]interface{}, expectedStatus string) {
+	t.Helper()
+	expectedKeys := []string{
+		"id", "service_name", "tool_name", "request_type",
+		"title", "summary", "status", "created_by_role",
+		"target_resource", "reviewer_comment", "created_at", "details",
+		"request", "corporate_requests",
+	}
+	for _, k := range expectedKeys {
+		if _, ok := raw[k]; !ok {
+			t.Errorf("expected top-level key %q in corporate request response, got keys: %+v", k, raw)
+		}
+	}
+	if raw["status"] != expectedStatus {
+		t.Errorf("expected top-level status %q, got %v", expectedStatus, raw["status"])
+	}
+	nested, ok := raw["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected nested request object, got %T", raw["request"])
+	}
+	if raw["id"] != nested["id"] || raw["status"] != nested["status"] {
+		t.Errorf("top-level id/status (%v/%v) must match nested request (%v/%v)", raw["id"], raw["status"], nested["id"], nested["status"])
+	}
+}
+
+func TestOpenAPIAndFrontendContractCompatibility(t *testing.T) {
+	s := setupTestServer()
+	router := s.Routes()
+
+	// 1. Both POST /api/v1/chat/message and POST /api/v1/chat/messages work
+	for _, path := range []string{"/api/v1/chat/message", "/api/v1/chat/messages"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", path, bytes.NewBufferString(`{"content":"Как оформить отгул?","scenario_hint":"scenario_02_absence_day_off"}`))
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST %s failed: %d, body: %s", path, w.Code, w.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode POST %s response: %v", path, err)
+		}
+		if resp["user_message"] == nil || resp["assistant_message"] == nil {
+			t.Errorf("POST %s missing user_message/assistant_message", path)
+		}
+	}
+
+	// 2. GET /api/v1/knowledge returns both visible_articles & items, role & active_role
+	kwW := httptest.NewRecorder()
+	kwReq := httptest.NewRequest("GET", "/api/v1/knowledge", nil)
+	kwReq.Header.Set("X-User-Role", "intern")
+	router.ServeHTTP(kwW, kwReq)
+	if kwW.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/knowledge failed: %d", kwW.Code)
+	}
+	var kwBody map[string]interface{}
+	if err := json.NewDecoder(kwW.Body).Decode(&kwBody); err != nil {
+		t.Fatalf("decode knowledge: %v", err)
+	}
+	if kwBody["role"] != "intern" || kwBody["active_role"] != "intern" {
+		t.Errorf("expected role=intern and active_role=intern, got role=%v active_role=%v", kwBody["role"], kwBody["active_role"])
+	}
+	visible, okV := kwBody["visible_articles"].([]interface{})
+	items, okI := kwBody["items"].([]interface{})
+	if !okV || !okI || len(visible) != 1 || len(items) != 1 {
+		t.Errorf("expected visible_articles and items each with 1 article, got visible=%v items=%v", kwBody["visible_articles"], kwBody["items"])
+	}
+	if _, ok := kwBody["hidden_by_rbac_count"]; !ok {
+		t.Errorf("expected hidden_by_rbac_count in knowledge payload")
+	}
+	if _, ok := kwBody["disclaimer"]; !ok {
+		t.Errorf("expected disclaimer in knowledge payload")
+	}
+
+	// 3. Health configured=true case
+	configuredAgent := ai.NewAgentOrchestrator(ai.Config{
+		Provider: "openrouter",
+		Model:    "openai/gpt-4o-mini",
+		APIKey:   "sk-or-test-key",
+	}, s.KB, s.Executor)
+	sConfigured := httpapi.NewServer(s.Store, s.Executor, s.KB, configuredAgent)
+	hW := httptest.NewRecorder()
+	sConfigured.Routes().ServeHTTP(hW, httptest.NewRequest("GET", "/api/v1/health", nil))
+	if hW.Code != http.StatusOK {
+		t.Fatalf("health failed: %d", hW.Code)
+	}
+	var hBody map[string]interface{}
+	if err := json.NewDecoder(hW.Body).Decode(&hBody); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if hBody["llm_model"] != "openai/gpt-4o-mini" || hBody["model"] != "openai/gpt-4o-mini" {
+		t.Errorf("expected both llm_model and model, got %+v", hBody)
+	}
+	if hBody["live_llm_configured"] != true || hBody["openrouter_configured"] != true {
+		t.Errorf("expected both live_llm_configured and openrouter_configured=true, got %+v", hBody)
+	}
+
+	// 4. writeError returns both "error" and "message" alongside "code"
+	errW := httptest.NewRecorder()
+	router.ServeHTTP(errW, httptest.NewRequest("POST", "/api/v1/chat/messages", bytes.NewBufferString(`{"content":""}`)))
+	if errW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", errW.Code)
+	}
+	var errBody map[string]string
+	if err := json.NewDecoder(errW.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if errBody["code"] != "EMPTY_MESSAGE" || errBody["error"] == "" || errBody["error"] != errBody["message"] {
+		t.Errorf("expected code=EMPTY_MESSAGE and matching error/message, got %+v", errBody)
+	}
+
+	// 5. Confirm & Review include flat CorporateRequest fields alongside wrapped fields
+	intern := domain.UserProfile{Role: domain.RoleIntern, ManagerName: "Дмитрий Волков", MentorName: "Мария Козлова"}
+	draft, err := s.Executor.CreateAbsenceRequest(intern, "study_day_off", "2026-11-18", "2026-11-18", "Экзамен", false)
+	if err != nil {
+		t.Fatalf("create draft failed: %v", err)
+	}
+
+	confW := httptest.NewRecorder()
+	router.ServeHTTP(confW, httptest.NewRequest("POST", "/api/v1/corporate/actions/confirm", bytes.NewBufferString(`{"request_id":"`+draft.ID+`"}`)))
+	if confW.Code != http.StatusOK {
+		t.Fatalf("confirm failed: %d, body: %s", confW.Code, confW.Body.String())
+	}
+	var confBody map[string]interface{}
+	if err := json.NewDecoder(confW.Body).Decode(&confBody); err != nil {
+		t.Fatalf("decode confirm response: %v", err)
+	}
+	assertTopLevelCorporateRequestFields(t, confBody, string(domain.StatusPendingApproval))
+	if _, ok := confBody["onboarding"]; !ok {
+		t.Errorf("expected onboarding in confirm response")
+	}
+	if _, ok := confBody["metrics"]; !ok {
+		t.Errorf("expected metrics in confirm response")
+	}
+
+	revReq := httptest.NewRequest("POST", "/api/v1/corporate/requests/"+draft.ID+"/review", bytes.NewBufferString(`{"decision":"approved","comment":"Одобрено"}`))
+	revReq.Header.Set("X-User-Role", "mentor")
+	revW := httptest.NewRecorder()
+	router.ServeHTTP(revW, revReq)
+	if revW.Code != http.StatusOK {
+		t.Fatalf("review failed: %d, body: %s", revW.Code, revW.Body.String())
+	}
+	var revBody map[string]interface{}
+	if err := json.NewDecoder(revW.Body).Decode(&revBody); err != nil {
+		t.Fatalf("decode review response: %v", err)
+	}
+	assertTopLevelCorporateRequestFields(t, revBody, string(domain.StatusApproved))
+	if revBody["reviewer_comment"] != "Одобрено" {
+		t.Errorf("expected top-level reviewer_comment='Одобрено', got %v", revBody["reviewer_comment"])
+	}
 }

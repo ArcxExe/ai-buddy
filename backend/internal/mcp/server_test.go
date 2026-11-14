@@ -293,3 +293,115 @@ func TestExecuteAllSevenMCPToolsAndRegistry(t *testing.T) {
 		t.Fatalf("expected clean state after Reset")
 	}
 }
+
+func TestExecuteToolParameterAliasesAndAccessDetails(t *testing.T) {
+	store := mcp.NewStore()
+	exec := mcp.NewExecutor(store)
+	intern := sampleUser(domain.RoleIntern)
+	mentor := sampleUser(domain.RoleMentor)
+	ctx := context.Background()
+
+	// 1. request_service_access with `justification` alias and Details enrichment
+	resAcc, err := exec.ExecuteTool(ctx, intern, "request_service_access", json.RawMessage(`{
+		"resource": "grafana:delivery-metrics",
+		"access_level": "read",
+		"justification": "Мониторинг RPS первой задачи"
+	}`))
+	if err != nil || !resAcc.Allowed || resAcc.ActionCard == nil {
+		t.Fatalf("request_service_access with justification failed: res=%+v err=%v", resAcc, err)
+	}
+	if resAcc.ActionCard.Details["reason"] != "Мониторинг RPS первой задачи" {
+		t.Errorf("expected justification in Details[reason], got %v", resAcc.ActionCard.Details["reason"])
+	}
+	if resAcc.ActionCard.Details["approver"] != "Дмитрий Волков" {
+		t.Errorf("expected approver Дмитрий Волков, got %v", resAcc.ActionCard.Details["approver"])
+	}
+	if resAcc.ActionCard.Details["buddy_check_note"] != "Перед запросом доп. доступа можно свериться с наставником" {
+		t.Errorf("unexpected buddy_check_note: %v", resAcc.ActionCard.Details["buddy_check_note"])
+	}
+
+	// Prefer non-empty reason over empty/whitespace, and prefer reason when both non-empty
+	resBoth, err := exec.ExecuteTool(ctx, intern, "request_service_access", json.RawMessage(`{
+		"resource": "env:staging-delivery",
+		"access_level": "read_write",
+		"reason": "Основная причина",
+		"justification": "Запасная причина"
+	}`))
+	if err != nil || resBoth.ActionCard == nil || resBoth.ActionCard.Details["reason"] != "Основная причина" {
+		t.Fatalf("expected non-empty reason preferred, got %+v err=%v", resBoth, err)
+	}
+
+	// Blocked request_service_access with `justification` alias
+	resBlocked, err := exec.ExecuteTool(ctx, intern, "request_service_access", json.RawMessage(`{
+		"resource": "prod-billing-db",
+		"access_level": "admin",
+		"justification": "Проверка прода"
+	}`))
+	if err != nil || resBlocked.Allowed || resBlocked.ActionCard == nil {
+		t.Fatalf("expected blocked action card, got %+v err=%v", resBlocked, err)
+	}
+	if resBlocked.ActionCard.Details["reason"] != "Проверка прода" {
+		t.Errorf("expected justification preserved on blocked card, got %v", resBlocked.ActionCard.Details["reason"])
+	}
+	if resBlocked.ActionCard.Details["approver"] != "Дмитрий Волков" {
+		t.Errorf("expected approver on blocked card, got %v", resBlocked.ActionCard.Details["approver"])
+	}
+
+	// Fallback approver when ManagerName is empty
+	internNoManager := intern
+	internNoManager.ManagerName = ""
+	reqFallback, err := exec.RequestServiceAccess(internNoManager, "grafana:delivery-alerts", "admin", "Алерты")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reqFallback.Details["approver"] != "Дмитрий Волков" {
+		t.Errorf("expected fallback approver Дмитрий Волков, got %v", reqFallback.Details["approver"])
+	}
+
+	// 2. create_absence_request with `confirmed` alias (true if either confirmed_by_user or confirmed is true)
+	resAbs, err := exec.ExecuteTool(ctx, intern, "create_absence_request", json.RawMessage(`{
+		"absence_type": "study_day_off",
+		"start_date": "2026-11-25",
+		"end_date": "2026-11-25",
+		"reason": "Экзамен",
+		"confirmed_by_user": false,
+		"confirmed": true
+	}`))
+	if err != nil || !resAbs.Allowed || resAbs.ActionCard == nil {
+		t.Fatalf("create_absence_request with confirmed alias failed: %+v err=%v", resAbs, err)
+	}
+	if resAbs.ActionCard.Status != domain.StatusPendingApproval {
+		t.Errorf("expected pending_approval when confirmed=true, got %s", resAbs.ActionCard.Status)
+	}
+
+	// 3. prepare_mentor_1on1_summary with `what_intern_already_checked` and `questions_for_mentor`
+	res1on1, err := exec.ExecuteTool(ctx, intern, "prepare_mentor_1on1_summary", json.RawMessage(`{
+		"topic": "Кэширование тарифов",
+		"what_intern_already_checked": ["Playbook", "README сервиса"],
+		"questions_for_mentor": ["Какой TTL выбрать?", "Нужен ли singleflight?"]
+	}`))
+	if err != nil || !res1on1.Allowed || res1on1.ActionCard == nil {
+		t.Fatalf("prepare_mentor_1on1_summary with aliases failed: %+v err=%v", res1on1, err)
+	}
+	checked, ok := res1on1.ActionCard.Details["what_checked"].([]string)
+	if !ok || len(checked) != 2 || checked[0] != "Playbook" {
+		t.Errorf("expected what_intern_already_checked mapped to what_checked, got %#v", res1on1.ActionCard.Details["what_checked"])
+	}
+	questions, ok := res1on1.ActionCard.Details["questions"].([]string)
+	if !ok || len(questions) != 2 || questions[1] != "Нужен ли singleflight?" {
+		t.Errorf("expected questions_for_mentor mapped to questions, got %#v", res1on1.ActionCard.Details["questions"])
+	}
+
+	// 4. review_corporate_request with `reviewer_comment` alias
+	resRev, err := exec.ExecuteTool(ctx, mentor, "review_corporate_request", json.RawMessage(`{
+		"request_id": "`+resAbs.ActionCard.ID+`",
+		"decision": "approved",
+		"reviewer_comment": "Согласовано, удачи на экзамене"
+	}`))
+	if err != nil || !resRev.Allowed || resRev.ActionCard == nil {
+		t.Fatalf("review_corporate_request with reviewer_comment failed: %+v err=%v", resRev, err)
+	}
+	if resRev.ActionCard.ReviewerComment != "Согласовано, удачи на экзамене" {
+		t.Errorf("expected ReviewerComment from reviewer_comment alias, got %q", resRev.ActionCard.ReviewerComment)
+	}
+}

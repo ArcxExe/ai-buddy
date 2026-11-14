@@ -66,7 +66,12 @@ func LoadWithLookup(lookup LookupFunc) Config {
 		timeoutMs = 25000
 	}
 
-	storageMode := strings.ToLower(strings.TrimSpace(parseString(lookup, "STORAGE_MODE", "memory")))
+	postgresDSN := strings.TrimSpace(parseString(lookup, "POSTGRES_DSN", ""))
+	defaultStorageMode := "memory"
+	if postgresDSN != "" {
+		defaultStorageMode = "postgres"
+	}
+	storageMode := strings.ToLower(strings.TrimSpace(parseString(lookup, "STORAGE_MODE", defaultStorageMode)))
 	if storageMode != "memory" && storageMode != "postgres" {
 		storageMode = "memory"
 	}
@@ -83,7 +88,7 @@ func LoadWithLookup(lookup LookupFunc) Config {
 		LLMTimeout:        time.Duration(timeoutMs) * time.Millisecond,
 
 		StorageMode:   storageMode,
-		PostgresDSN:   strings.TrimSpace(parseString(lookup, "POSTGRES_DSN", "")),
+		PostgresDSN:   postgresDSN,
 		RedisAddr:     strings.TrimSpace(parseString(lookup, "REDIS_ADDR", "")),
 		RedisPassword: parseString(lookup, "REDIS_PASSWORD", ""),
 		KnowledgePath: strings.TrimSpace(parseString(lookup, "KNOWLEDGE_PATH", "")),

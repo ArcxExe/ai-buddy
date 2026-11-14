@@ -590,3 +590,33 @@ func TestNewRepositoryFactoryFallback(t *testing.T) {
 	// Unused imports guard sanity check on hex/md5 helpers.
 	_ = hex.EncodeToString(md5.New().Sum(nil))
 }
+
+func TestCloneKnowledgeArticle(t *testing.T) {
+	orig := domain.KnowledgeArticle{
+		ID:          "kb-01-access-idm",
+		Title:       "Доступы",
+		Category:    "onboarding",
+		Sensitivity: "intern",
+		Source:      "Playbook",
+		Summary:     "Кратко",
+		Content:     "Подробно",
+		Tags:        []string{"idm", "access"},
+	}
+
+	cloned := CloneKnowledgeArticle(orig)
+	if cloned.ID != orig.ID || cloned.Title != orig.Title || len(cloned.Tags) != 2 || cloned.Tags[0] != "idm" {
+		t.Fatalf("unexpected cloned article: %+v", cloned)
+	}
+
+	cloned.Title = "Изменено"
+	cloned.Tags[0] = "mutated"
+	if orig.Title != "Доступы" || orig.Tags[0] != "idm" {
+		t.Fatalf("original article mutated after modifying clone: %+v", orig)
+	}
+
+	nilTagsOrig := domain.KnowledgeArticle{ID: "kb-empty"}
+	nilTagsClone := CloneKnowledgeArticle(nilTagsOrig)
+	if nilTagsClone.Tags != nil || nilTagsClone.ID != "kb-empty" {
+		t.Fatalf("expected nil tags preserved on clone: %+v", nilTagsClone)
+	}
+}

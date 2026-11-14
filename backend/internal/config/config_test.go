@@ -108,3 +108,46 @@ func TestLoadEdgeCases(t *testing.T) {
 	}
 	_ = Load()
 }
+
+func TestStorageModeAutoSelection(t *testing.T) {
+	const dsn = "postgres://aibuddy:secret@postgres:5432/aibuddy?sslmode=disable"
+
+	cases := []struct {
+		name     string
+		env      map[string]string
+		expected string
+	}{
+		{
+			name:     "unset STORAGE_MODE with non-empty POSTGRES_DSN defaults to postgres",
+			env:      map[string]string{"POSTGRES_DSN": dsn},
+			expected: "postgres",
+		},
+		{
+			name:     "empty STORAGE_MODE with non-empty POSTGRES_DSN defaults to postgres",
+			env:      map[string]string{"STORAGE_MODE": "  ", "POSTGRES_DSN": dsn},
+			expected: "postgres",
+		},
+		{
+			name:     "explicit STORAGE_MODE=memory with non-empty POSTGRES_DSN honors memory",
+			env:      map[string]string{"STORAGE_MODE": "memory", "POSTGRES_DSN": dsn},
+			expected: "memory",
+		},
+		{
+			name:     "unset STORAGE_MODE with empty POSTGRES_DSN defaults to memory",
+			env:      map[string]string{"POSTGRES_DSN": ""},
+			expected: "memory",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := LoadWithLookup(func(key string) (string, bool) {
+				v, ok := tc.env[key]
+				return v, ok
+			})
+			if cfg.StorageMode != tc.expected {
+				t.Fatalf("expected StorageMode %q, got %q", tc.expected, cfg.StorageMode)
+			}
+		})
+	}
+}

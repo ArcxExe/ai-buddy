@@ -309,6 +309,11 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 		if toolName == "request_service_access" {
 			level, _ := argsMap["access_level"].(string)
 			why, _ := argsMap["reason"].(string)
+			if strings.TrimSpace(why) == "" {
+				if just, ok := argsMap["justification"].(string); ok {
+					why = just
+				}
+			}
 			card, _ := e.RequestServiceAccess(user, targetResource, level, why)
 			payload, _ := json.Marshal(map[string]interface{}{
 				"allowed":         false,
@@ -410,9 +415,10 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 
 	case "request_service_access":
 		var p struct {
-			Resource    string `json:"resource"`
-			AccessLevel string `json:"access_level"`
-			Reason      string `json:"reason"`
+			Resource      string `json:"resource"`
+			AccessLevel   string `json:"access_level"`
+			Reason        string `json:"reason"`
+			Justification string `json:"justification"`
 		}
 		_ = json.Unmarshal(rawArgs, &p)
 		if strings.TrimSpace(p.Resource) == "" {
@@ -421,10 +427,14 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 		if p.AccessLevel == "" {
 			p.AccessLevel = "read_write"
 		}
-		if p.Reason == "" {
-			p.Reason = "Запрошено через AI-buddy для выполнения задач команды"
+		reason := p.Reason
+		if strings.TrimSpace(reason) == "" {
+			reason = p.Justification
 		}
-		req, err := e.RequestServiceAccess(user, p.Resource, p.AccessLevel, p.Reason)
+		if strings.TrimSpace(reason) == "" {
+			reason = "Запрошено через AI-buddy для выполнения задач команды"
+		}
+		req, err := e.RequestServiceAccess(user, p.Resource, p.AccessLevel, reason)
 		if err != nil {
 			return nil, err
 		}
@@ -445,6 +455,7 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 			EndDate         string `json:"end_date"`
 			Reason          string `json:"reason"`
 			ConfirmedByUser bool   `json:"confirmed_by_user"`
+			Confirmed       bool   `json:"confirmed"`
 		}
 		_ = json.Unmarshal(rawArgs, &p)
 		if p.AbsenceType == "" {
@@ -459,7 +470,8 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 		if p.Reason == "" {
 			p.Reason = "Учебный/личный day-off по согласованию с наставником"
 		}
-		req, err := e.CreateAbsenceRequest(user, p.AbsenceType, p.StartDate, p.EndDate, p.Reason, p.ConfirmedByUser)
+		confirmed := p.ConfirmedByUser || p.Confirmed
+		req, err := e.CreateAbsenceRequest(user, p.AbsenceType, p.StartDate, p.EndDate, p.Reason, confirmed)
 		if err != nil {
 			return nil, err
 		}
@@ -475,21 +487,31 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 
 	case "prepare_mentor_1on1_summary":
 		var p struct {
-			Topic       string   `json:"topic"`
-			WhatChecked []string `json:"what_checked"`
-			Questions   []string `json:"questions"`
+			Topic                    string   `json:"topic"`
+			WhatChecked              []string `json:"what_checked"`
+			WhatInternAlreadyChecked []string `json:"what_intern_already_checked"`
+			Questions                []string `json:"questions"`
+			QuestionsForMentor       []string `json:"questions_for_mentor"`
 		}
 		_ = json.Unmarshal(rawArgs, &p)
 		if p.Topic == "" {
 			p.Topic = "Первая задача стажёра и вопросы по архитектуре"
 		}
-		if len(p.WhatChecked) == 0 {
-			p.WhatChecked = []string{"Playbook и README сервиса", "Локальный запуск и тесты"}
+		whatChecked := p.WhatChecked
+		if len(whatChecked) == 0 {
+			whatChecked = p.WhatInternAlreadyChecked
 		}
-		if len(p.Questions) == 0 {
-			p.Questions = []string{"Соответствует ли подход стандартам команды?", "Какие edge-cases проверить перед PR?"}
+		if len(whatChecked) == 0 {
+			whatChecked = []string{"Playbook и README сервиса", "Локальный запуск и тесты"}
 		}
-		req, err := e.PrepareMentor1on1Summary(user, p.Topic, p.WhatChecked, p.Questions)
+		questions := p.Questions
+		if len(questions) == 0 {
+			questions = p.QuestionsForMentor
+		}
+		if len(questions) == 0 {
+			questions = []string{"Соответствует ли подход стандартам команды?", "Какие edge-cases проверить перед PR?"}
+		}
+		req, err := e.PrepareMentor1on1Summary(user, p.Topic, whatChecked, questions)
 		if err != nil {
 			return nil, err
 		}
@@ -505,12 +527,17 @@ func (e *Executor) ExecuteTool(_ context.Context, user domain.UserProfile, toolN
 
 	case "review_corporate_request":
 		var p struct {
-			RequestID string `json:"request_id"`
-			Decision  string `json:"decision"`
-			Comment   string `json:"comment"`
+			RequestID       string `json:"request_id"`
+			Decision        string `json:"decision"`
+			Comment         string `json:"comment"`
+			ReviewerComment string `json:"reviewer_comment"`
 		}
 		_ = json.Unmarshal(rawArgs, &p)
-		req, err := e.ReviewRequest(user.Role, p.RequestID, p.Decision, p.Comment)
+		comment := p.Comment
+		if strings.TrimSpace(comment) == "" {
+			comment = p.ReviewerComment
+		}
+		req, err := e.ReviewRequest(user.Role, p.RequestID, p.Decision, comment)
 		if err != nil {
 			return nil, err
 		}
@@ -547,6 +574,12 @@ func (e *Executor) RequestServiceAccess(user domain.UserProfile, resource string
 	allowed, denyReason := rbac.CanExecuteMCPTool(user.Role, "request_service_access", resource)
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	approver := strings.TrimSpace(user.ManagerName)
+	if approver == "" {
+		approver = "Дмитрий Волков"
+	}
+	const buddyCheckNote = "Перед запросом доп. доступа можно свериться с наставником"
+
 	e.Store.Mu.Lock()
 	defer e.Store.Mu.Unlock()
 
@@ -563,10 +596,12 @@ func (e *Executor) RequestServiceAccess(user domain.UserProfile, resource string
 			TargetResource: resource,
 			CreatedAt:      now,
 			Details: map[string]interface{}{
-				"resource":     resource,
-				"access_level": level,
-				"reason":       reason,
-				"policy_rule":  "RBAC_GUARDRAIL_DENIED",
+				"resource":         resource,
+				"access_level":     level,
+				"reason":           reason,
+				"approver":         approver,
+				"buddy_check_note": buddyCheckNote,
+				"policy_rule":      "RBAC_GUARDRAIL_DENIED",
 			},
 		}
 		e.Store.CorporateRequests = append([]domain.CorporateRequest{req}, e.Store.CorporateRequests...)
@@ -581,7 +616,7 @@ func (e *Executor) RequestServiceAccess(user domain.UserProfile, resource string
 	reviewerNote := "Автоматически одобрено по базовому профилю команды " + user.Team
 	if level == "admin" {
 		status = domain.StatusPendingApproval
-		reviewerNote = "Требует подтверждения руководителя: " + user.ManagerName
+		reviewerNote = "Требует подтверждения руководителя: " + approver
 	}
 
 	req := domain.CorporateRequest{
@@ -596,11 +631,13 @@ func (e *Executor) RequestServiceAccess(user domain.UserProfile, resource string
 		TargetResource: resource,
 		CreatedAt:      now,
 		Details: map[string]interface{}{
-			"resource":     resource,
-			"access_level": level,
-			"reason":       reason,
-			"sla":          "Доступ выдаётся в течение 15 минут",
-			"synthetic":    true,
+			"resource":         resource,
+			"access_level":     level,
+			"reason":           reason,
+			"approver":         approver,
+			"buddy_check_note": buddyCheckNote,
+			"sla":              "Доступ выдаётся в течение 15 минут",
+			"synthetic":        true,
 		},
 	}
 

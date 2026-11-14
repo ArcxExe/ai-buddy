@@ -84,9 +84,12 @@ docker compose up --build
 - **REST API Backend:** [http://localhost:8080/api/v1/health](http://localhost:8080/api/v1/health)
 
 > Если `OPENROUTER_API_KEY` пустая, используется **Smart Fallback Engine**.
-> Текущий Compose передаёт DSN и Redis, но не `STORAGE_MODE`: по умолчанию Backend
-> работает в memory-режиме, поэтому наличие PostgreSQL-контейнера не гарантирует
-> сохранение состояния в PostgreSQL. Docker-конфигурация не изменялась.
+> Compose передаёт `STORAGE_MODE` (по умолчанию `postgres`), DSN и Redis и ожидает
+> успешных healthcheck PostgreSQL/Redis перед запуском Backend. Скопированный
+> корневой `.env.example` явно задаёт `STORAGE_MODE=memory`: для PostgreSQL
+> измените это значение на `postgres` в своём `.env`. При недоступности
+> PostgreSQL Backend может перейти на память; фактический режим проверяйте
+> в `/api/v1/health`, не считайте запуск контейнера гарантией сохранения данных.
 > Пароль БД в примере — публичное демонстрационное значение, не production-секрет.
 > В production UI скрыты демо-переключение роли и reset; сценарии жюри ниже
 > выполняйте в Development на отдельном Backend.

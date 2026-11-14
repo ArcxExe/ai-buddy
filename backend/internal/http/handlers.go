@@ -97,6 +97,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/onboarding/checklist/{itemId}", s.handleUpdateChecklist)
 	mux.HandleFunc("GET /api/v1/chat/messages", s.handleGetMessages)
 	mux.HandleFunc("POST /api/v1/chat/message", s.handlePostMessage)
+	mux.HandleFunc("POST /api/v1/chat/messages", s.handlePostMessage)
 	mux.HandleFunc("POST /api/v1/chat/reset", s.handleReset)
 	mux.HandleFunc("POST /api/v1/corporate/actions/confirm", s.handleConfirmAction)
 	mux.HandleFunc("POST /api/v1/corporate/requests/{requestId}/review", s.handleReviewRequest)
@@ -206,7 +207,8 @@ func (s *Server) corsAndTelemetryMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 
 		// Record sub-second SLA telemetry for local API endpoints (excluding external LLM calls).
-		if s.Tracker != nil && r.URL.Path != "/api/v1/chat/message" {
+		isChatPost := r.Method == http.MethodPost && (r.URL.Path == "/api/v1/chat/message" || r.URL.Path == "/api/v1/chat/messages")
+		if s.Tracker != nil && !isChatPost {
 			elapsed := time.Since(start)
 			s.Tracker.RecordLatency(r.URL.Path, s.resolveRequestRole(r), elapsed)
 			avgMs := int(math.Round(s.Tracker.AvgLocalLatencyMs()))
@@ -256,8 +258,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"status":                "ok",
 		"go_version":            s.GoVersion,
 		"llm_provider":          provider,
+		"llm_model":             model,
 		"model":                 model,
 		"fallback_ready":        true,
+		"live_llm_configured":   configured,
 		"openrouter_configured": configured,
 		"storage_mode":          s.Store.RepositoryMode(),
 	})
@@ -442,12 +446,10 @@ func (s *Server) handleConfirmAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	onboarding, requests, metrics := s.Store.GetSnapshot()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"request":            updated,
-		"onboarding":         onboarding,
-		"corporate_requests": requests,
-		"metrics":            metrics,
-	})
+	payload := corporateRequestResponse(updated, requests)
+	payload["onboarding"] = onboarding
+	payload["metrics"] = metrics
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
@@ -478,10 +480,29 @@ func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, requests, _ := s.Store.GetSnapshot()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, corporateRequestResponse(updated, requests))
+}
+
+func corporateRequestResponse(updated *domain.CorporateRequest, requests []domain.CorporateRequest) map[string]interface{} {
+	payload := map[string]interface{}{
 		"request":            updated,
 		"corporate_requests": requests,
-	})
+	}
+	if updated != nil {
+		payload["id"] = updated.ID
+		payload["service_name"] = updated.ServiceName
+		payload["tool_name"] = updated.ToolName
+		payload["request_type"] = updated.RequestType
+		payload["title"] = updated.Title
+		payload["summary"] = updated.Summary
+		payload["status"] = updated.Status
+		payload["created_by_role"] = updated.CreatedByRole
+		payload["target_resource"] = updated.TargetResource
+		payload["reviewer_comment"] = updated.ReviewerComment
+		payload["created_at"] = updated.CreatedAt
+		payload["details"] = updated.Details
+	}
+	return payload
 }
 
 func (s *Server) handleKnowledge(w http.ResponseWriter, r *http.Request) {
@@ -504,9 +525,11 @@ func (s *Server) handleKnowledge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"role":                 activeRole,
+		"active_role":          activeRole,
+		"visible_articles":     articles,
 		"items":                articles,
 		"hidden_by_rbac_count": hiddenCount,
-		"active_role":          activeRole,
 		"disclaimer":           "Синтетическая база знаний прототипа AI-buddy с RBAC-фильтрацией чувствительности.",
 	})
 }
@@ -520,6 +543,7 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]string{
 		"code":    code,
+		"error":   message,
 		"message": message,
 	})
 }

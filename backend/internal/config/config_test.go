@@ -19,6 +19,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LLMTimeout != 25*time.Second {
 		t.Fatalf("expected 25s timeout, got %v", cfg.LLMTimeout)
 	}
+	if cfg.LLMMaxTokens != 1024 {
+		t.Fatalf("expected default LLMMaxTokens 1024, got %d", cfg.LLMMaxTokens)
+	}
 	if cfg.StorageMode != "memory" {
 		t.Fatalf("expected memory storage mode, got %s", cfg.StorageMode)
 	}
@@ -44,6 +47,7 @@ func TestLoadCustomValuesAndInvalidFallbacks(t *testing.T) {
 		"OPENROUTER_BASE_URL":             "https://openrouter.ai/api/v1/",
 		"OPENROUTER_MODEL":                "anthropic/claude-3.5-sonnet",
 		"LLM_TIMEOUT_MS":                  "invalid",
+		"LLM_MAX_TOKENS":                  "2048",
 		"STORAGE_MODE":                    "POSTGRES",
 		"POSTGRES_DSN":                    "postgres://aibuddy:secret@postgres:5432/aibuddy?sslmode=disable",
 		"REDIS_ADDR":                      "redis:6379",
@@ -74,6 +78,9 @@ func TestLoadCustomValuesAndInvalidFallbacks(t *testing.T) {
 	if cfg.LLMTimeout != 25*time.Second {
 		t.Fatalf("expected fallback 25s on invalid timeout, got %v", cfg.LLMTimeout)
 	}
+	if cfg.LLMMaxTokens != 2048 {
+		t.Fatalf("expected LLMMaxTokens 2048, got %d", cfg.LLMMaxTokens)
+	}
 	if cfg.StorageMode != "postgres" {
 		t.Fatalf("expected lowercase postgres mode, got %s", cfg.StorageMode)
 	}
@@ -86,6 +93,7 @@ func TestLoadEdgeCases(t *testing.T) {
 	env := map[string]string{
 		"BACKEND_PORT":         "   ",
 		"LLM_TIMEOUT_MS":       "-500",
+		"LLM_MAX_TOKENS":       "0",
 		"STORAGE_MODE":         "unknown-db",
 		"CORS_ALLOWED_ORIGINS": " , , ",
 	}
@@ -99,6 +107,9 @@ func TestLoadEdgeCases(t *testing.T) {
 	}
 	if cfg.LLMTimeout != 25*time.Second {
 		t.Fatalf("expected fallback timeout on negative value, got %v", cfg.LLMTimeout)
+	}
+	if cfg.LLMMaxTokens != 1024 {
+		t.Fatalf("expected fallback LLMMaxTokens 1024 on non-positive value, got %d", cfg.LLMMaxTokens)
 	}
 	if len(cfg.CORSAllowedOrigins) != 2 {
 		t.Fatalf("expected default CORS origins on empty CSV, got %#v", cfg.CORSAllowedOrigins)

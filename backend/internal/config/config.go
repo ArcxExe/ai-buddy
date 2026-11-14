@@ -37,6 +37,7 @@ type Config struct {
 	OpenRouterBaseURL string
 	OpenRouterModel   string
 	LLMTimeout        time.Duration
+	LLMMaxTokens      int
 
 	StorageMode   string
 	PostgresDSN   string
@@ -66,6 +67,11 @@ func LoadWithLookup(lookup LookupFunc) Config {
 		timeoutMs = 25000
 	}
 
+	maxTokens := parseInt(lookup, "LLM_MAX_TOKENS", 1024)
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+
 	postgresDSN := strings.TrimSpace(parseString(lookup, "POSTGRES_DSN", ""))
 	defaultStorageMode := "memory"
 	if postgresDSN != "" {
@@ -86,6 +92,7 @@ func LoadWithLookup(lookup LookupFunc) Config {
 		OpenRouterBaseURL: strings.TrimRight(parseString(lookup, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/"),
 		OpenRouterModel:   parseString(lookup, "OPENROUTER_MODEL", "google/gemini-2.5-flash"),
 		LLMTimeout:        time.Duration(timeoutMs) * time.Millisecond,
+		LLMMaxTokens:      maxTokens,
 
 		StorageMode:   storageMode,
 		PostgresDSN:   postgresDSN,

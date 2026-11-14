@@ -166,7 +166,14 @@ func TestSmartFallbackScenario3Mentor1on1AndLocalSetup(t *testing.T) {
 }
 
 func TestOpenRouterCallSuccess(t *testing.T) {
+	var capturedMaxTokens int
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody ai.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedMaxTokens = reqBody.MaxTokens
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
@@ -189,8 +196,62 @@ func TestOpenRouterCallSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if capturedMaxTokens != 1024 {
+		t.Errorf("expected default max_tokens 1024, got %d", capturedMaxTokens)
+	}
 	if msg.Content != "Ответ от модели через OpenRouter API" {
 		t.Errorf("expected response from mock openrouter, got %s", msg.Content)
+	}
+}
+
+func TestOpenRouter402AutoRetryWithLowerMaxTokens(t *testing.T) {
+	attempts := 0
+	var retryMaxTokens int
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var reqBody ai.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		if attempts == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 65535 tokens, but can only afford 512.","code":402}}`))
+			return
+		}
+
+		retryMaxTokens = reqBody.MaxTokens
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"model": "google/gemini-2.5-flash",
+			"choices": [{
+				"message": {
+					"content": "Успешный ответ после снижения max_tokens"
+				}
+			}]
+		}`))
+	}))
+	defer mockServer.Close()
+
+	agent, _ := setupTestAgent("test-api-key", mockServer.URL)
+	msg, err := agent.ProcessMessage(context.Background(), testUser(), "Привет, расскажи про команду", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts (402 retry), got %d", attempts)
+	}
+	if retryMaxTokens <= 0 || retryMaxTokens >= 512 {
+		t.Fatalf("expected clamped max_tokens < 512 and > 0, got %d", retryMaxTokens)
+	}
+	if !strings.HasPrefix(msg.EngineUsed, "openrouter:") {
+		t.Fatalf("expected openrouter engine without fallback, got %s", msg.EngineUsed)
+	}
+	if msg.Content != "Успешный ответ после снижения max_tokens" {
+		t.Fatalf("unexpected message content: %s", msg.Content)
 	}
 }
 

@@ -86,6 +86,7 @@ func main() {
 		BaseURL:        cfg.OpenRouterBaseURL,
 		Model:          cfg.OpenRouterModel,
 		Timeout:        cfg.LLMTimeout,
+		MaxTokens:      cfg.LLMMaxTokens,
 		EnableFallback: true,
 	}
 	agent := ai.NewAgentOrchestratorWithDeps(aiCfg, kb, exec, exec, nil, tracker, cfg.FeatureFlags.RBACStrict)

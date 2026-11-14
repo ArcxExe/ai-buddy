@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"aibuddy/backend/internal/mcp"
 )
+
+var affordableTokensRegex = regexp.MustCompile(`can only afford\s+(\d+)`)
 
 // ToolCallFunction represents the tool name and JSON-encoded arguments chosen by the LLM.
 type ToolCallFunction struct {
@@ -87,35 +91,27 @@ func (c *OpenRouterClient) ChatCompletion(ctx context.Context, req ChatCompletio
 	if c == nil || c.APIKey == "" {
 		return nil, errors.New("openrouter api key is empty")
 	}
+	if req.MaxTokens <= 0 {
+		req.MaxTokens = defaultMaxTokens
+	}
 
-	payloadBytes, err := json.Marshal(req)
+	statusCode, body, err := c.sendChatRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint := c.BaseURL + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	httpReq.Header.Set("HTTP-Referer", "https://avito.ru/ai-buddy-prototype")
-	httpReq.Header.Set("X-Title", "AI-buddy Avito Start Prototype")
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if err != nil {
-		return nil, err
+	if statusCode == http.StatusPaymentRequired {
+		if clamped, ok := clampAffordableTokens(string(body), req.MaxTokens); ok {
+			req.MaxTokens = clamped
+			statusCode, body, err = c.sendChatRequest(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("openrouter HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if statusCode >= 300 {
+		return nil, fmt.Errorf("openrouter HTTP %d: %s", statusCode, strings.TrimSpace(string(body)))
 	}
 
 	var parsed struct {
@@ -151,4 +147,55 @@ func (c *OpenRouterClient) ChatCompletion(ctx context.Context, req ChatCompletio
 		ToolCalls: parsed.Choices[0].Message.ToolCalls,
 		Model:     parsed.Model,
 	}, nil
+}
+
+func (c *OpenRouterClient) sendChatRequest(ctx context.Context, req ChatCompletionRequest) (int, []byte, error) {
+	payloadBytes, err := json.Marshal(req)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	endpoint := c.BaseURL + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return 0, nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	httpReq.Header.Set("HTTP-Referer", "https://avito.ru/ai-buddy-prototype")
+	httpReq.Header.Set("X-Title", "AI-buddy Avito Start Prototype")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
+}
+
+func clampAffordableTokens(errBody string, currentMax int) (int, bool) {
+	m := affordableTokensRegex.FindStringSubmatch(errBody)
+	if len(m) < 2 {
+		return 0, false
+	}
+	afford, err := strconv.Atoi(m[1])
+	if err != nil || afford < 64 || afford >= currentMax {
+		return 0, false
+	}
+	clamped := afford * 8 / 10
+	if clamped < 64 {
+		clamped = 64
+	}
+	if clamped >= afford {
+		clamped = afford - 1
+	}
+	if clamped <= 0 {
+		return 0, false
+	}
+	return clamped, true
 }

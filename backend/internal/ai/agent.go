@@ -17,7 +17,10 @@ import (
 	"aibuddy/backend/internal/telemetry"
 )
 
-const maxToolExecutionRounds = 4
+const (
+	maxToolExecutionRounds = 4
+	defaultMaxTokens       = 1024
+)
 
 var isoDatePattern = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}\b`)
 
@@ -28,6 +31,7 @@ type Config struct {
 	BaseURL        string
 	Model          string
 	Timeout        time.Duration
+	MaxTokens      int
 	EnableFallback bool
 }
 
@@ -58,6 +62,9 @@ func NewAgentOrchestrator(cfg Config, kb *rag.KnowledgeBase, exec *mcp.Executor)
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		cfg.Model = "google/gemini-2.5-flash"
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = defaultMaxTokens
 	}
 
 	httpClient := &http.Client{Timeout: timeout}
@@ -237,12 +244,17 @@ func (a *AgentOrchestrator) runOpenRouterLoop(
 	var actionCard *domain.CorporateRequest
 
 	modelUsed := a.Config.Model
+	maxTokens := a.Config.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
 	for round := 0; round < maxToolExecutionRounds; round++ {
 		req := ChatCompletionRequest{
 			Model:       a.Config.Model,
 			Messages:    messages,
 			Tools:       tools,
 			Temperature: 0.2,
+			MaxTokens:   maxTokens,
 		}
 		if round == maxToolExecutionRounds-1 {
 			req.Tools = nil

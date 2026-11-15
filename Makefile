@@ -22,8 +22,6 @@ coverage:
 	@echo "==> Generating Frontend Coverage Report..."
 	@cd frontend && npm run test:coverage -- --coverage.reporter=html --coverage.reporter=text-summary --coverage.reportsDirectory=../coverage/frontend > /dev/null 2>&1 || true
 	@echo "================================================================="
-	@echo "📊 СВОДНЫЙ ОТЧЁТ О ПОКРЫТИИ ТЕСТАМИ (Жёсткое требование >80%):"
-	@echo "================================================================="
 	@tail -n 1 coverage/backend-summary.txt | awk '{print "Backend (Go):  " $$3 " coverage"}'
 	@grep -E "All files" coverage/frontend/coverage-summary.json 2>/dev/null || echo "Frontend (React): >85% coverage (см. coverage/frontend/index.html)"
 	@echo "Подробные HTML-отчёты сохранены в папке coverage/"

@@ -1,14 +1,12 @@
 # AI-buddy: ИИ-наставник для стажёров
 
 > **Хакатон Avito Start (Hack&Change 2026)**  
-> **Команда:** 5 человек (2 AI-разработчика с Gemini & Codex + 3 участника продуктового/аналитического трека)  
-> **Видеодемонстрация:** ссылка пока не добавлена (см. раздел в конце).
 
 React-интерфейс с пятью разделами: главная, ИИ-помощник, адаптация, база знаний
 и заявки. Подробные инструкции, структура Frontend, переменные окружения и
 ограничения — в **[frontend/README.md](frontend/README.md)**.
 
-Для Windows ниже приведены два разных режима: [Development](#windows-development)
+Есть два разных режима: [Development](#windows-development)
 на `127.0.0.1:5174` и [production preview](#production-preview) на `127.0.0.1:4174`.
 Backend требуется в обоих. Публикация исходников на GitHub не запускает приложение.
 
@@ -64,14 +62,13 @@ buddy на **40–45%** (18–22 часа) и сокращение `Time-to-Firs
 
 ## 🚀 Быстрый запуск (Docker Compose за 1 команду)
 
-### Способ 1. Запуск через Docker Compose (Рекомендуемый для жюри)
+### Способ 1. Запуск через Docker Compose
 
 ```bash
 # 1. Склонируйте репозиторий
-git clone https://github.com/ArcxExe/ai-buddy.git
-cd ai-buddy
+git clone https://github.com/ArcxExe/ai-buddy.git && cd ai-buddy
 
-# 2. Создайте файл конфигурации (при необходимости укажите ключ OpenRouter)
+# 2. Создайте файл конфигурации ( укажите ключ OpenRouter)
 test -f .env || cp .env.example .env
 
 # 3. Запустите весь стек одной командой
@@ -103,81 +100,6 @@ cd backend && BACKEND_PORT=18080 STORAGE_MODE=memory go run ./cmd/server
 # Терминал 2: React Frontend (Node 22+)
 cd frontend && npm install && npm run dev
 ```
-
-<a id="windows-development"></a>
-
-### Способ 3. Windows PowerShell: Development
-
-Требуются **Go 1.24+** (см. `backend/go.mod`), **Node.js 22+** и npm в `PATH`.
-Проверенное окружение: Go 1.27.4, Node.js 24.15.0, npm 11.12.1. После установки
-инструментов откройте новый терминал; при необходимости перезапустите VS Code.
-
-Откройте два терминала в корне репозитория `ai-buddy`:
-
-```powershell
-# Терминал 1: Backend; из backend можно выполнить .\start-local.cmd
-.\backend\start-local.cmd
-
-# Терминал 2: установка зависимостей и Frontend
-npm.cmd --prefix frontend install
-npm.cmd --prefix frontend run dev -- --host 127.0.0.1 --port 5174
-```
-
-Для установки строго по lock-файлу вместо `install` используйте
-`npm.cmd --prefix frontend ci`. Установка требуется после клонирования и обновления
-зависимостей. Development автоматически отображает изменения исходников без
-ручного build. В нём доступны демо-роли и reset; не публикуйте dev-сервер для
-конечных пользователей.
-
-Из каталога `frontend` достаточно `npm.cmd run dev` (порт по умолчанию — 5173).
-Используются `.cmd`, поскольку
-PowerShell с политикой `Restricted` может блокировать `npm.ps1` и `.ps1`-скрипты.
-Изменять ExecutionPolicy или системные настройки Windows не требуется.
-
-- Frontend по команде выше: **http://127.0.0.1:5174/**.
-- Проверка Backend: **http://127.0.0.1:18080/api/v1/health**.
-- Проверка API через Vite: **http://127.0.0.1:5174/api/v1/health**.
-- Клиент обращается к относительному `/api/v1`; Vite направляет `/api` на Backend.
-
-`start-local.cmd` использует `setlocal`: переменные задаются только для запускаемого
-процесса и его дочерних процессов. Включены `STORAGE_MODE=memory` и автономный
-`smart_fallback`; PostgreSQL, Redis и OpenRouter не подключаются, ключ не нужен.
-Корневой `.env` этот скрипт не загружает. Демо-данные исчезают после остановки Backend.
-
-Параметры Vite по умолчанию сохранены в `frontend/vite.config.ts`: IPv4-адрес
-`127.0.0.1`, порт `5173`, `strictPort=true`, прокси `http://127.0.0.1:18080`.
-Для другого окружения можно один раз скопировать пример и изменить значения:
-
-```powershell
-if (!(Test-Path .\frontend\.env.local)) {
-  Copy-Item .\frontend\.env.example .\frontend\.env.local
-}
-```
-
-`DEV_HOST`, `DEV_PORT` и `API_PROXY_TARGET` читаются из `frontend/.env.local` или
-окружения процесса. Файл `.env.local` игнорируется Git и сохраняется между
-перезапусками VS Code; после изменения настроек перезапустите Vite. Для запуска
-Backend на другом порту используйте, например, `.\backend\start-local.cmd 18081`
-и укажите `API_PROXY_TARGET=http://127.0.0.1:18081` в `frontend/.env.local`.
-Настройки касаются dev-сервера Vite: Docker по-прежнему использует Nginx и
-`backend:8080`, Docker-конфигурация не меняется.
-
-Для остановки нажмите **Ctrl+C в каждом терминале**. Если Windows спросит
-`Terminate batch job (Y/N)?`, ответьте `Y`. Backend должен вывести
-`Shutting down AI-buddy Backend cleanly...`. Не закрывайте терминал до завершения.
-
-Если выбранный dev-порт занят, Vite завершится с ошибкой вместо смены порта.
-Посмотреть владельца порта можно командой:
-
-```powershell
-Get-NetTCPConnection -State Listen -LocalPort 5174,4174,18080 -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress,LocalPort,OwningProcess
-```
-
-Остановите свой предыдущий экземпляр либо выберите другие порты через настройки
-выше. Сторонний Apache на 8080 останавливать не нужно. В некоторых средах запуска
-агента esbuild может получить `Access is denied` при чтении родительских каталогов;
-это ограничение sandbox. Для обычного локального запуска используйте терминал VS Code.
 
 ---
 
@@ -286,7 +208,7 @@ make test-frontend
 
 ## 🎥 Видеодемонстрация
 Видеодемонстрация (2.5 минуты, путь от запроса стажёра до согласования наставником и срабатывания RBAC):
-- Ссылка: `[Вставить ссылку перед отправкой на платформу]` (согласно слайду 8).
+- Ссылка: `https://drive.google.com/file/d/1bD3Y8hY_L-vpPgsRgNB0qzYPvxtki9FH/view?usp=sharing`.
 
 ## Известные ограничения
 
